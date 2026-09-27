@@ -1,0 +1,218 @@
+SmartBookShelf - STEP 1 structure tree and parameter table
+==========================================================================
+
+Units: 1 Blender unit = 1 mm, unit scale = 0.001
+Axes : X width (+X right) | Y depth (+Y FRONT) | Z height
+Origin: bottom centre
+Scope: cabinet + drive columns + moving platform + book.
+       limit plate / rear pusher / chute = later steps
+
+OBJECT TREE
+--------------------------------------------------------------------------
+[COL-01_Cabinet]
+   GEO_Cabinet_Base                         600.0 x   450.0 x    20.0  grp=CABINET
+   GEO_Cabinet_Post_BackL                    20.0 x    20.0 x  1200.0  grp=CABINET
+   GEO_Cabinet_Post_BackR                    20.0 x    20.0 x  1200.0  grp=CABINET
+   GEO_Cabinet_Post_FrontL                   20.0 x    20.0 x  1200.0  grp=CABINET
+   GEO_Cabinet_Post_FrontR                   20.0 x    20.0 x  1200.0  grp=CABINET
+   GEO_Front_L1_Bottom                      560.0 x    20.0 x   500.0  grp=CABINET
+   GEO_Front_L3_Top                         560.0 x    20.0 x   500.0  grp=CABINET
+   GEO_Front_Rail_MidHigh                   560.0 x    20.0 x    20.0  grp=CABINET
+   GEO_Front_Rail_MidLow                    560.0 x    20.0 x    20.0  grp=CABINET
+   GEO_Shell_Back                           556.0 x    20.0 x  1158.0  grp=CABINET
+   GEO_Shell_Side_L                          20.0 x   406.0 x  1158.0  grp=CABINET
+   GEO_Shell_Side_R                          20.0 x   406.0 x  1158.0  grp=CABINET
+   GEO_Top_Bar_Back                         600.0 x   120.0 x    20.0  grp=CABINET
+   GEO_Top_Bar_Front                        600.0 x   120.0 x    20.0  grp=CABINET
+   GEO_Top_Bar_Left                         155.0 x   170.0 x    20.0  grp=CABINET
+   GEO_Top_Bar_Right                        155.0 x   170.0 x    20.0  grp=CABINET
+[COL-02_DriveColumns]
+   GEO_Coupling_L                            22.0 x    22.0 x    32.0  grp=CABINET
+   GEO_Coupling_R                            22.0 x    22.0 x    32.0  grp=CABINET
+   GEO_Motor42_L_Body                        42.0 x    42.0 x    38.0  grp=CABINET
+   GEO_Motor42_L_Flange                      46.0 x    46.0 x     4.0  grp=CABINET
+   GEO_Motor42_L_Shaft                        8.0 x     8.0 x    10.0  grp=CABINET
+   GEO_Motor42_R_Body                        42.0 x    42.0 x    38.0  grp=CABINET
+   GEO_Motor42_R_Flange                      46.0 x    46.0 x     4.0  grp=CABINET
+   GEO_Motor42_R_Shaft                        8.0 x     8.0 x    10.0  grp=CABINET
+   GEO_Rail_L_Plate                          60.0 x    30.0 x   900.0  grp=CABINET
+   GEO_Rail_L_Track                          20.0 x    20.0 x   900.0  grp=CABINET
+   GEO_Rail_R_Plate                          60.0 x    30.0 x   900.0  grp=CABINET
+   GEO_Rail_R_Track                          20.0 x    20.0 x   900.0  grp=CABINET
+   GEO_Screw_L_Core                          13.0 x    13.0 x   900.0  grp=CABINET
+   GEO_Screw_L_Thread                        16.0 x    16.0 x   901.3  grp=CABINET
+   GEO_Screw_L_TopBlock                      36.0 x    36.0 x    20.0  grp=CABINET
+   GEO_Screw_R_Core                          13.0 x    13.0 x   900.0  grp=CABINET
+   GEO_Screw_R_Thread                        16.0 x    16.0 x   901.3  grp=CABINET
+   GEO_Screw_R_TopBlock                      36.0 x    36.0 x    20.0  grp=CABINET
+[COL-03_MovingPlatform]
+   GEO_Platform_Bracket_L                    10.0 x    80.0 x   138.0  grp=PLATFORM
+   GEO_Platform_Bracket_R                    10.0 x     5.0 x   138.0  grp=PLATFORM
+   GEO_Platform_Carriage_L_Screw             80.0 x    80.0 x    80.0  grp=PLATFORM
+   GEO_Platform_Carriage_R_Rail              80.0 x    80.0 x    80.0  grp=PLATFORM
+   GEO_Platform_Guard_Left                   10.0 x   210.0 x    10.0  grp=PLATFORM
+   GEO_Platform_Guard_Rear                  424.0 x    10.0 x    10.0  grp=PLATFORM
+   GEO_Platform_Plate                       424.0 x   220.0 x    10.0  grp=PLATFORM
+   GEO_Platform_Rib_L                        10.0 x     8.0 x   134.0  grp=PLATFORM
+   GEO_Platform_Rib_R                        10.0 x     8.0 x   134.0  grp=PLATFORM
+[COL-05_Book]
+   GEO_Book_Cover_Bottom                    210.0 x   185.0 x     3.0  grp=BOOK
+   GEO_Book_Cover_Top                       210.0 x   185.0 x     3.0  grp=BOOK
+   GEO_Book_Pages                           204.0 x   179.0 x    34.0  grp=BOOK
+   GEO_Book_Spine                           210.0 x     3.0 x    40.0  grp=BOOK
+[COL-90_RenderStage]
+   CAM_Diag_Front                             0.0 x     0.0 x     0.0  grp=-
+   CAM_Diag_Left                              0.0 x     0.0 x     0.0  grp=-
+   CAM_Diag_Top                               0.0 x     0.0 x     0.0  grp=-
+   CAM_OpenInterior                           0.0 x     0.0 x     0.0  grp=-
+   CAM_Preview_3Q                             0.0 x     0.0 x     0.0  grp=-
+   LGT_Fill                                   0.0 x     0.0 x     0.0  grp=-
+   LGT_Key                                    0.0 x     0.0 x     0.0  grp=-
+   LGT_Rim                                    0.0 x     0.0 x     0.0  grp=-
+   LGT_Top                                    0.0 x     0.0 x     0.0  grp=-
+   STAGE_Backdrop                          8000.0 x   200.0 x  4060.0  grp=-
+   STAGE_Floor                             8000.0 x  8000.0 x    60.0  grp=-
+
+PARAMETERS
+--------------------------------------------------------------------------
+  BOOK_COVER_T           = 3.0
+  BOOK_PAGE_INSET        = 3.0
+  BOOK_SPINE_Y           = -50.0
+  BOOK_T                 = 40.0
+  BOOK_X                 = 210.0
+  BOOK_X0                = -105.0
+  BOOK_X1                = 105.0
+  BOOK_Y                 = 185.0
+  BOOK_Y0                = -50.0
+  BOOK_Y1                = 135.0
+  BOOK_Z0                = 580.0
+  BOOK_Z1                = 620.0
+  BRK_Z0                 = 436.0
+  BRK_Z1                 = 574.0
+  CAB_D                  = 450.0
+  CAB_H                  = 1200.0
+  CAB_W                  = 600.0
+  CAB_X0                 = -300.0
+  CAB_X1                 = 300.0
+  CAB_Y0                 = -225.0
+  CAB_Y1                 = 225.0
+  CAB_Z0                 = 0.0
+  CAB_Z1                 = 1200.0
+  CARR_IN_X              = 255.0
+  CARR_OUT_X             = 175.0
+  CHUTE_ANGLE            = 30.0
+  CHUTE_LEN              = 200.0
+  CHUTE_T                = 8.0
+  CHUTE_W                = 280.0
+  CHUTE_WALL_H           = 25.0
+  COL_X                  = 215.0
+  COUPLING_D             = 22.0
+  COUPLING_H             = 32.0
+  COUPLING_Z0            = 58.0
+  COUPLING_Z1            = 90.0
+  FRAME_T                = 20.0
+  FRONT_RAIL_T           = 20.0
+  IN_X0                  = -280.0
+  IN_X1                  = 280.0
+  IN_Y0                  = -205.0
+  IN_Y1                  = 205.0
+  LIMIT_SLIDER_Z         = 640.0
+  LIM_BODY_T             = 12.0
+  LIM_BODY_Z0            = 645.0
+  LIM_BODY_Z1            = 657.0
+  LIM_CARR_X0            = -212.0
+  LIM_CARR_X1            = -132.0
+  LIM_PAD_BOTTOM_Z       = 642.0
+  LIM_PAD_T              = 3.0
+  LIM_PAD_TOP_Z          = 645.0
+  LIM_X0                 = -132.0
+  LIM_X1                 = 132.0
+  LIM_Y0                 = -80.0
+  LIM_Y1                 = 175.0
+  M42                    = 42.0
+  M42_H                  = 38.0
+  M42_SHAFT_D            = 8.0
+  M42_SHAFT_L            = 10.0
+  MIN_CLEARANCE          = 2.0
+  MOTOR_FOOT_Z0          = 20.0
+  MOTOR_TOP_Z            = 90.0
+  PCARR_D                = 34.0
+  PCARR_H                = 62.0
+  PCARR_T                = 14.0
+  PCARR_W                = 80.0
+  PLATFORM_SLIDER_Z      = 480.0
+  PLAT_BOT_Z             = 570.0
+  PLAT_GUARD_H           = 10.0
+  PLAT_GUARD_T           = 10.0
+  PLAT_GUARD_X0          = -212.0
+  PLAT_GUARD_X1          = -202.0
+  PLAT_GUARD_Y0          = 140.0
+  PLAT_GUARD_Y1          = 150.0
+  PLAT_GUARD_Z1          = 590.0
+  PLAT_RIB_T             = 8.0
+  PLAT_RISE_T            = 10.0
+  PLAT_T                 = 10.0
+  PLAT_TOP_Z             = 580.0
+  PLAT_X0                = -212.0
+  PLAT_X1                = 212.0
+  PLAT_Y0                = -70.0
+  PLAT_Y1                = 150.0
+  PORT_CZ                = 600.0
+  PORT_H                 = 160.0
+  PORT_Z0                = 520.0
+  PORT_Z1                = 680.0
+  PUSH_CZ                = 600.0
+  PUSH_PLATE_H           = 80.0
+  PUSH_PLATE_T           = 5.0
+  PUSH_PLATE_W           = 150.0
+  PUSH_PLATE_Y0          = -55.0
+  PUSH_PLATE_Y1          = -50.0
+  PUSH_PLATE_Z0          = 560.0
+  PUSH_PLATE_Z1          = 640.0
+  PUSH_ROD_D             = 12.0
+  PUSH_STROKE            = 80.0
+  RAIL_L                 = (-215.0, 215.0)
+  RAIL_LEN               = 900.0
+  RAIL_PLATE_T           = 30.0
+  RAIL_PLATE_W           = 60.0
+  RAIL_R                 = (215.0, 215.0)
+  RAIL_SQ                = 20.0
+  RAIL_X_IN              = 250.0
+  RAIL_Y                 = 215.0
+  RAIL_Z0                = 20.0
+  RAIL_Z1                = 920.0
+  RIB_X0                 = -222.0
+  RIB_X1                 = -212.0
+  RIB_Y                  = -140.0
+  RIB_Z0                 = 440.0
+  SCREW_CREST_D          = 16.0
+  SCREW_D                = 12.0
+  SCREW_L                = (-215.0, -175.0)
+  SCREW_LEN              = 900.0
+  SCREW_PITCH            = 4.0
+  SCREW_R                = (215.0, -175.0)
+  SCREW_ROOT_D           = 13.0
+  SCREW_Y                = -175.0
+  SCREW_Z0               = 90.0
+  SCREW_Z1               = 990.0
+  SHUTTLE_H              = 80.0
+  SHUTTLE_W              = 80.0
+  SHUTTLE_Z0             = 440.0
+  SHUTTLE_Z1             = 520.0
+  SLIDER_MIN_OFFSET      = 150.0
+  TOP_HOLE_CX            = 0.0
+  TOP_HOLE_CY            = 0.0
+  TOP_HOLE_D             = 170.0
+  TOP_HOLE_W             = 250.0
+  UNIT_SCALE             = 0.001
+
+CHECKS
+--------------------------------------------------------------------------
+  cross-group pairs tested : 0
+  min clearance required   : 2.0 mm
+  clash gate               : PASSED
+  mesh objects             : 49
+  polygons                 : 32786
+  render engine            : BLENDER_EEVEE
+  resolution               : 1920x1080
+  animation                : NONE (no keyframes, single frame)

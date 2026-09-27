@@ -1,0 +1,188 @@
+SliderRailConcept - structure tree, object naming, parameter table
+==============================================================================
+
+Units : 1 Blender unit = 1 mm   (unit_settings.scale_length = 0.001)
+Axes  : X = left / right,  Y = depth,  Z = height (+Z up)
+Origin: each component is modelled around its own bottom centre and
+        parented to an Empty that carries the world placement, so a
+        component stays re-usable on its own.
+
+COMPONENT ORIGINS
+------------------------------------------------------------------------------
+  Empty_Slider_Axis        world = (-100.0, 0.0, 0.0) mm
+  Empty_Rail_Axis          world = (100.0, -1500.0, 0.0) mm
+
+OBJECT TREE
+------------------------------------------------------------------------------
+Empty_Slider_Axis
+  +- GEO_Slider_Block             group=BLOCK      
+     local size     80.0 x    80.0 x    32.0 mm
+     local Z       487.5 ..   519.5 mm
+     verts 2264   tris 4528   materials 2
+  +- GEO_Slider_Coupling          group=COUPLING   
+     local size     20.2 x    15.0 x    25.0 mm
+     local Z        40.0 ..    65.0 mm
+     verts 3096   tris 6184   materials 2
+  +- GEO_Slider_LeadScrew         group=SCREW      
+     local size     12.0 x    12.0 x   843.5 mm
+     local Z        56.5 ..   900.0 mm
+     verts 13476  tris 20272  materials 1
+  +- GEO_Slider_Motor42           group=MOTOR      
+     local size     42.0 x    42.0 x    53.0 mm
+     local Z         0.0 ..    53.0 mm
+     verts 1890   tris 3776   materials 4
+  +- GEO_Slider_TopBearing        group=TOPSUPPORT 
+     local size     44.0 x    44.0 x    25.9 mm
+     local Z       874.0 ..   899.9 mm
+     verts 1440   tris 2880   materials 2
+
+Empty_Rail_Axis
+  +- GEO_Rail_Body                group=RAIL       
+     local size     40.0 x    15.0 x   900.0 mm
+     local Z         0.0 ..   900.0 mm
+     verts 2292   tris 4640   materials 1
+  +- GEO_Rail_Carriage            group=CARRIAGE   
+     local size     60.0 x    40.0 x    30.0 mm
+     local Z       485.0 ..   515.0 mm
+     verts 460    tris 920    materials 1
+
+DECLARED MATES (may share AABB space, never solid volume)
+------------------------------------------------------------------------------
+  COUPLING <-> SCREW       screw shank clamped inside the coupling
+  MOTOR <-> COUPLING       motor shaft runs inside the coupling bore
+  RAIL <-> CARRIAGE        carriage sleeve runs on the rail
+  SCREW <-> BLOCK          screw passes through the matching-thread bore
+  SCREW <-> TOPSUPPORT     screw journal inside the top bearing block
+
+PARAMETERS (mm)
+------------------------------------------------------------------------------
+  BLOCK_BOLT_HEAD_D              = 9.000
+  BLOCK_BOLT_HEAD_H              = 4.000
+  BLOCK_BOLT_HEX_AF              = 5.000
+  BLOCK_BOLT_SEAT                = 0.100
+  BLOCK_BOLT_XY                  = 28.000
+  BLOCK_BOLT_Z0                  = 512.400
+  BLOCK_BOLT_Z1                  = 516.400
+  BLOCK_BORE_D                   = 13.000
+  BLOCK_BOSS_D                   = 40.000
+  BLOCK_BOSS_H                   = 7.000
+  BLOCK_BOSS_SINK                = 1.500
+  BLOCK_BOSS_Z0                  = 511.000
+  BLOCK_BOSS_Z1                  = 519.500
+  BLOCK_CZ                       = 500.000
+  BLOCK_T                        = 25.000
+  BLOCK_X                        = 80.000
+  BLOCK_Y                        = 80.000
+  BLOCK_Z0                       = 487.500
+  BLOCK_Z1                       = 512.500
+  CAM_AZ                         = -58.000
+  CAM_EL                         = 22.000
+  CARR_BEVEL                     = 1.500
+  CARR_BOLT_X                    = 18.000
+  CARR_BOLT_ZOFF                 = 9.000
+  CARR_CBORE_D                   = 11.000
+  CARR_CBORE_DEPTH               = 4.000
+  CARR_CLR                       = 0.300
+  CARR_CZ                        = 500.000
+  CARR_H                         = 30.000
+  CARR_HOLE_D                    = 6.600
+  CARR_IN_X0                     = -20.300
+  CARR_IN_X1                     = 20.300
+  CARR_IN_Y0                     = -7.800
+  CARR_IN_Y1                     = 7.800
+  CARR_X                         = 60.000
+  CARR_X0                        = -30.000
+  CARR_X1                        = 30.000
+  CARR_Y                         = 40.000
+  CARR_Y0                        = -20.000
+  CARR_Y1                        = 20.000
+  CARR_Z0                        = 485.000
+  CARR_Z1                        = 515.000
+  COUPLING_BORE_BOT_D            = 8.400
+  COUPLING_BORE_TOP_D            = 12.400
+  COUPLING_D                     = 15.000
+  COUPLING_GAP                   = 2.000
+  COUPLING_JAM_D                 = 6.000
+  COUPLING_JAM_L                 = 3.000
+  COUPLING_JAM_Z                 = 6.000
+  COUPLING_L                     = 25.000
+  COUPLING_SPLIT_FROM_TOP        = 9.000
+  COUPLING_SPLIT_Z               = 56.000
+  COUPLING_Z0                    = 40.000
+  COUPLING_Z1                    = 65.000
+  MATE_CLEARANCE                 = 0.150
+  MAT_BLOCK                      = MAT-Slider_Silver
+  MAT_BOLT                       = MAT-Bolt_Dark
+  MAT_CARRIAGE                   = MAT-Carriage_Silver
+  MAT_COUPLING                   = MAT-Coupling_Silver
+  MAT_MOTOR                      = MAT-Motor_Black
+  MAT_MOTOR_FACE                 = MAT-Motor_Face
+  MAT_RAIL                       = MAT-Rail_Silver
+  MAT_SCREW                      = MAT-Screw_Aluminium
+  MAT_SHAFT                      = MAT-Motor_Shaft
+  MAT_SUPPORT                    = MAT-Support_Silver
+  MIN_CLEARANCE                  = 2.000
+  MOTOR_BOSS_D                   = 22.000
+  MOTOR_BOSS_DEPTH               = 1.200
+  MOTOR_D                        = 42.000
+  MOTOR_H                        = 38.000
+  MOTOR_SCREW_D                  = 5.500
+  MOTOR_SCREW_H                  = 2.000
+  MOTOR_SCREW_SEAT               = 0.100
+  MOTOR_SCREW_XY                 = 15.500
+  MOTOR_SHAFT_D                  = 8.000
+  MOTOR_SHAFT_L                  = 15.000
+  MOTOR_SHAFT_SINK               = 8.000
+  MOTOR_W                        = 42.000
+  MOTOR_Z0                       = 0.000
+  MOTOR_Z1                       = 38.000
+  RAIL_BEVEL                     = 1.200
+  RAIL_BOT_Z                     = 0.000
+  RAIL_CBORE_D                   = 11.000
+  RAIL_CBORE_DEPTH               = 6.000
+  RAIL_GROOVE_AXIS_X             = 20.700
+  RAIL_GROOVE_DEPTH              = 1.800
+  RAIL_GROOVE_R                  = 2.500
+  RAIL_HOLE_D                    = 6.600
+  RAIL_HOLE_END                  = 30.000
+  RAIL_HOLE_N                    = 15.000
+  RAIL_L                         = 900.000
+  RAIL_T                         = 15.000
+  RAIL_W                         = 40.000
+  RAIL_X0                        = -20.000
+  RAIL_X1                        = 20.000
+  RAIL_Y0                        = -7.500
+  RAIL_Y1                        = 7.500
+  RAIL_Z0                        = 0.000
+  RAIL_Z1                        = 900.000
+  SCREW_CORE_D                   = 10.400
+  SCREW_D                        = 12.000
+  SCREW_LEN                      = 843.500
+  SCREW_PITCH                    = 6.000
+  SCREW_SEG                      = 64.000
+  SCREW_STEPS_PER_TURN           = 24.000
+  SCREW_THREAD_Z_MARGIN          = 1.500
+  SCREW_Z_BOT                    = 56.500
+  SCREW_Z_TOP                    = 900.000
+  SHAFT_Z0                       = 30.000
+  SHAFT_Z1                       = 53.000
+  THREAD_Z0                      = 58.000
+  THREAD_Z1                      = 898.500
+  TOP_SUPPORT                    = True
+  TOP_SUPPORT_BOLT_D             = 7.000
+  TOP_SUPPORT_BOLT_H             = 2.000
+  TOP_SUPPORT_BOLT_XY            = 15.000
+  TOP_SUPPORT_BOLT_Z0            = 897.900
+  TOP_SUPPORT_BOLT_Z1            = 899.900
+  TOP_SUPPORT_BORE_D             = 13.000
+  TOP_SUPPORT_H                  = 24.000
+  TOP_SUPPORT_TOP_Z              = 898.000
+  TOP_SUPPORT_X                  = 44.000
+  TOP_SUPPORT_Y                  = 44.000
+  TOP_SUPPORT_Z0                 = 874.000
+  TOP_SUPPORT_Z1                 = 898.000
+  UNIT_SCALE                     = 0.001
+  WORLD_RAIL_X                   = 100.000
+  WORLD_RAIL_Y                   = -1500.000
+  WORLD_SLIDER_X                 = -100.000
+  WORLD_SLIDER_Y                 = 0.000

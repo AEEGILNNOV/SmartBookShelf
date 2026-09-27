@@ -1,0 +1,221 @@
+{
+ "build": {
+  "objects": 129,
+  "verts": 18764,
+  "faces": 13488,
+  "parented_books": 5,
+  "modifiers_applied": 7,
+  "kinematic_nodes": 28,
+  "materials": 28,
+  "collections": 14
+ },
+ "anim": {
+  "actions": 7,
+  "action_names": [
+   "Book_03Action",
+   "GapAdjust_LeadScrewAction",
+   "LiftPlatformAction",
+   "Lift_LeadScrewAction",
+   "Middle_LayerAction",
+   "Push_CarriageAction",
+   "Push_LeadScrewAction"
+  ],
+  "frames": [
+   1,
+   360
+  ],
+  "fps": 24,
+  "duration_s": 14.96,
+  "platform_lift_mm": 140.0,
+  "slot_range_mm": [
+   18.0,
+   53.0
+  ],
+  "slot_at_target_mm": 33.0,
+  "push_stroke_mm": 132.0,
+  "book_protrusion_mm": 37.0
+ },
+ "explode": {
+  "exploded_objects": 94,
+  "groups": 17,
+  "offset_x": 1150.0
+ },
+ "validate": {
+  "failed": {},
+  "passed": 26,
+  "total": 26,
+  "clash_free": true,
+  "clash": [],
+  "min_clearance_mm": [
+   0.0,
+   [
+    "BackPanel",
+    "MotorBracket_03"
+   ]
+  ]
+ },
+ "_assertions": [
+  {
+   "id": "A1",
+   "desc": "整机外形 = 600 × 350 × 700 mm",
+   "ok": true,
+   "detail": "[600.0, 350.0, 700.0]"
+  },
+  {
+   "id": "A2",
+   "desc": "系统仅 3 台 42 步进电机（无 28BYJ / 舵机 / 机械臂）",
+   "ok": true,
+   "detail": "['Motor01_Push_42', 'Motor02_GapAdjust_42', 'Motor03_Lift_42']"
+  },
+  {
+   "id": "A2b",
+   "desc": "无 28BYJ-48 / 舵机 / 机械臂 / 齿轮齿条零件",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "id": "A3",
+   "desc": "三台电机全部经丝杆传动（3 根带真实螺旋螺纹的丝杆）",
+   "ok": true,
+   "detail": "[['Lift_LeadScrew', 5332, 5234], ['Push_LeadScrew', 2676, 2578], ['GapAdjust_LeadScrew', 2756, 2658]]"
+  },
+  {
+   "id": "A4",
+   "desc": "5 本书全部水平平躺（Z 向尺寸 = 厚度，非竖立）",
+   "ok": true,
+   "detail": "[['Book_01', 180.0, 150.0, 15.0], ['Book_02', 180.0, 150.0, 25.0], ['Book_03', 180.0, 150.0, 30.0], ['Book_04', 180.0, 150.0, 40.0], ['Book_05', 180.0, 150.0, 50.0]]"
+  },
+  {
+   "id": "A5",
+   "desc": "Book_01 底面恰好落在升降平台顶面（书随平台运动）",
+   "ok": true,
+   "detail": "[200.0, 200.0]"
+  },
+  {
+   "id": "A5b",
+   "desc": "Books_Stack 为 LiftPlatform 的子级（平台 → 书堆 运动链）",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "id": "A6",
+   "desc": "电机1 固定不动（不随平台升降）",
+   "ok": true,
+   "detail": "[[0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]]"
+  },
+  {
+   "id": "A6b",
+   "desc": "推书丝杆固定（只自转）",
+   "ok": true,
+   "detail": "[[160.0, 160.0, 160.0, 160.0], [0.0, 0.0, 0.0, 0.0], [387.5, 387.5, 387.5, 387.5]]"
+  },
+  {
+   "id": "A7",
+   "desc": "推书板仅沿 Y（前后）运动，X / Z 恒定",
+   "ok": true,
+   "detail": "[[0.0, 0.0, 0.0, 0.0], [-82.0, -82.0, -75.4747, -82.0], [0.0, 0.0, 0.0, 0.0]]"
+  },
+  {
+   "id": "A8",
+   "desc": "中间夹层仅沿 Z（上下）运动，X / Y 恒定",
+   "ok": true,
+   "detail": "[[0.0, 0.0, 0.0, 0.0], [147.0, 147.0, 147.0, 147.0], [398.0, 398.0, 413.0, 413.0]]"
+  },
+  {
+   "id": "A9",
+   "desc": "升降平台仅沿 Z（上下）运动，X / Y 恒定",
+   "ok": true,
+   "detail": "[[0.0, 0.0, 0.0, 0.0], [15.0, 15.0, 15.0, 15.0], [200.0, 278.7298, 340.0, 340.0]]"
+  },
+  {
+   "id": "A10",
+   "desc": "推出孔可调高度覆盖 15–50 mm 书厚（18–53 mm）",
+   "ok": true,
+   "detail": "[18.0, 53.0]"
+  },
+  {
+   "id": "A11",
+   "desc": "推书板高 14 mm ≤ 最薄书 15 mm（可穿过推出孔推单本）",
+   "ok": true,
+   "detail": "14.0"
+  },
+  {
+   "id": "A12",
+   "desc": "目标书 Book_03 到位时下沿 = 推出孔下沿 380 mm",
+   "ok": true,
+   "detail": "340.0"
+  },
+  {
+   "id": "A13",
+   "desc": "推出后书本伸出柜体 37 mm（≥ 25 mm）",
+   "ok": true,
+   "detail": "37.0"
+  },
+  {
+   "id": "A14",
+   "desc": "中间夹层在全部行程都遮住开口上沿（不露缝）",
+   "ok": true,
+   "detail": "112.0"
+  },
+  {
+   "id": "A15",
+   "desc": "升降平台最高位 ≤ 推出孔下沿（不与推书机构干涉）",
+   "ok": true,
+   "detail": "[380.0, 380.0]"
+  },
+  {
+   "id": "A16",
+   "desc": "每条直线导轨都配真实滑块（5 组）",
+   "ok": true,
+   "detail": "['LiftPlatform_Guide_Left', 'LiftPlatform_Guide_Right', 'Push_GuideRail', 'Gap_Guide', 'Gap_Guide_Mirror']"
+  },
+  {
+   "id": "A17",
+   "desc": "3 台电机均为 42×42×38 机身 + 端盖 + 止口 + 5 mm 输出轴",
+   "ok": true,
+   "detail": "[['Motor01_Push_42', [42.3, 67.2, 42.3]], ['Motor02_GapAdjust_42', [42.3, 42.3, 67.2]], ['Motor03_Lift_42', [42.3, 42.3, 67.2]]]"
+  },
+  {
+   "id": "A18",
+   "desc": "第 13 节 13 个集合齐备",
+   "ok": true,
+   "detail": "[]"
+  },
+  {
+   "id": "A18b",
+   "desc": "第 12 节必需零件齐备（33 项）",
+   "ok": true,
+   "detail": "[]"
+  },
+  {
+   "id": "A19",
+   "desc": "存在机械动画（15 s / 24 fps / 360 帧）",
+   "ok": true,
+   "detail": "{'actions': 7, 'end': 360, 'fps': 24}"
+  },
+  {
+   "id": "A20",
+   "desc": "全部机构零件都位于柜体内腔 544×310×670 之内",
+   "ok": true,
+   "detail": "[]"
+  },
+  {
+   "id": "A21",
+   "desc": "电机1 只推书 / 电机2 只调推出孔 / 电机3 只升降",
+   "ok": true,
+   "detail": ""
+  },
+  {
+   "id": "A22",
+   "desc": "中间夹层是独立结构件，位于前面板之后的推出区域",
+   "ok": true,
+   "detail": ""
+  }
+ ],
+ "docs": {
+  "path": "D:\\Project\\SmartBookShelf\\docs\\结构说明与参数表.txt",
+  "bytes": 27966,
+  "lines": 473
+ },
+ "seconds": 3.2
+}

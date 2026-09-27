@@ -1,0 +1,211 @@
+SmartBookshelf_ElevatorClamp_Root   (origin = bottom centre, unit = mm)
+  COL-01_Cabinet   [cabinet]  31 objects
+      +- Control_Panel
+      +- Control_Screen
+      +- Frame_Post_LB
+      +- Frame_Post_LF
+      +- Frame_Post_RB
+      +- Frame_Post_RF
+      +- Frame_Rail_Bottom_Back
+      +- Frame_Rail_Bottom_Front
+      +- Frame_Rail_Bottom_Left
+      +- Frame_Rail_Bottom_Right
+      +- Frame_Rail_Top_Back
+      +- Frame_Rail_Top_Front
+      +- Frame_Rail_Top_Left
+      +- Frame_Rail_Top_Right
+      +- Front_Level_Bottom
+      +- Front_Level_Top
+      +- Front_Port_Jamb_Left
+      +- Front_Port_Jamb_Right
+      +- Front_Port_Sill
+      +- Shell_Back
+      +- Shell_Base
+      +- Shell_Side_Left
+      +- Shell_Side_Right
+      +- Top_Hole_Bezel_Front
+      +- Top_Hole_Bezel_Left
+      +- Top_Hole_Bezel_Rear
+      +- Top_Hole_Bezel_Right
+      +- Top_Plate_Front
+      +- Top_Plate_Left
+      +- Top_Plate_Rear
+      \- Top_Plate_Right
+  COL-02_DriveColumns   [drive]  16 objects
+      +- Drive_Coupling_Left
+      +- Drive_Coupling_Right
+      +- Drive_Motor42_Left_Body
+      +- Drive_Motor42_Left_Cap
+      +- Drive_Motor42_Left_Shaft
+      +- Drive_Motor42_Right_Body
+      +- Drive_Motor42_Right_Cap
+      +- Drive_Motor42_Right_Shaft
+      +- Drive_Rail_Foot_Left
+      +- Drive_Rail_Foot_Right
+      +- Drive_Rail_Left
+      +- Drive_Rail_Right
+      +- Drive_Screw_Base_Left
+      +- Drive_Screw_Base_Right
+      +- Drive_Screw_Left
+      \- Drive_Screw_Right
+  COL-03_MovingPlatform   [platform]  12 objects
+      +- Platform_Bracket_Left
+      +- Platform_Bracket_Right
+      +- Platform_Carriage_Left
+      +- Platform_Carriage_Left_Nut
+      +- Platform_Carriage_Right
+      +- Platform_Carriage_Right_Nut
+      +- Platform_Lip_Left
+      +- Platform_Lip_RearLeft
+      +- Platform_Lip_RearRight
+      +- Platform_Plate_Main
+      +- Platform_Plate_RearLeft
+      \- Platform_Plate_RearRight
+  COL-04_LimitPlate   [limit]  8 objects
+      +- Limit_Bracket_Left
+      +- Limit_Bracket_Right
+      +- Limit_Carriage_Left
+      +- Limit_Carriage_Left_Nut
+      +- Limit_Carriage_Right
+      +- Limit_Carriage_Right_Nut
+      +- Limit_Pad_Black
+      \- Limit_Plate_Body
+  COL-05_RearPushUnit   [push]  8 objects
+      +- Push_Coupling
+      +- Push_Motor42_Body
+      +- Push_Motor42_Cap
+      +- Push_Motor_Mount
+      +- Push_Plate
+      +- Push_Plate_Hub
+      +- Push_Rod
+      \- Push_Rod_LeadScrew
+  COL-06_Book   [book]  4 objects
+      +- Book_Cover_Bottom
+      +- Book_Cover_Top
+      +- Book_Pages
+      \- Book_Spine
+  COL-07_TakeOffChute   [chute]  3 objects
+      +- Chute_Ramp
+      +- Chute_Wall_Left
+      \- Chute_Wall_Right
+  TOTAL mesh objects: 82
+
+PARAMETER                           VALUE  UNIT/NOTE
+--------------------------------------------------------------
+BOOK_COVER_T                            3
+BOOK_CX                                 0
+BOOK_D                                210
+BOOK_PAGE_INSET                         3
+BOOK_SPINE_Y                          -50
+BOOK_T                                 40
+BOOK_W                                150
+BOOK_X0                               -75
+BOOK_X1                                75
+BOOK_Y0                               -50
+BOOK_Y1                               160
+BOOK_Z0                               580
+BOOK_Z1                               620
+CAB_D                                 450
+CAB_H                                1200
+CAB_W                                 600
+CAB_X0                               -300
+CAB_X1                                300
+CAB_Y0                               -225
+CAB_Y1                                225
+CAB_Z0                                  0
+CAB_Z1                               1200
+CARR_X                                243
+CHUTE_ANGLE                            30
+CHUTE_LEN                             200
+CHUTE_T                                 8
+CHUTE_W                               280
+CHUTE_WALL_H                           25
+COL_X                                 255
+COUPLING_BOT_Z0                        58
+COUPLING_BOT_Z1                        90
+COUPLING_H                             32
+COUPLING_Y0                          -161
+COUPLING_Y1                          -135
+FRAME_T                                20
+IN_X0                                -280
+IN_X1                                 280
+IN_Y0                                -205
+IN_Y1                                 205
+LIMIT_SLIDER_Z                        640
+LIM_BODY_T                             12
+LIM_BODY_Z0                           645
+LIM_BODY_Z1                           657
+LIM_PAD_BOTTOM_Z                      642
+LIM_PAD_T                               3
+LIM_PAD_TOP_Z                         645
+LIM_X0                               -132
+LIM_X1                                132
+LIM_Y0                                -70
+LIM_Y1                                180
+MIN_CLEARANCE                           2
+MOTOR_FOOT_Z0                          20
+MOTOR_H                                38
+MOTOR_L                              42.4
+MOTOR_TOP_Z                            90
+MOTOR_W                              42.4
+PLATFORM_SLIDER_Z                     480
+PLAT_BOT_Z                            570
+PLAT_BRACKET_RISE                     100
+PLAT_BRACKET_Z0                       440
+PLAT_FLANGE_H                          10
+PLAT_FLANGE_T                          10
+PLAT_FLANGE_Z0                        580
+PLAT_FLANGE_Z1                        590
+PLAT_MIN_Z                            150
+PLAT_SLOT_X                            88
+PLAT_SLOT_Y0                          -62
+PLAT_SLOT_Y1                          -46
+PLAT_T                                 10
+PLAT_TOP_Z                            580
+PLAT_X0                              -212
+PLAT_X1                               212
+PLAT_Y0                               -62
+PLAT_Y1                               165
+PORT_CZ                               600
+PORT_Z0                               540
+PORT_Z1                               660
+PUSH_CPL_D                             22
+PUSH_CPL_LEN                           26
+PUSH_CZ                               600
+PUSH_MOTOR_Y0                        -199
+PUSH_MOTOR_Y1                        -161
+PUSH_MOUNT_T                            6
+PUSH_MOUNT_Y0                        -205
+PUSH_MOUNT_Y1                        -199
+PUSH_PLATE_H                           80
+PUSH_PLATE_T                            5
+PUSH_PLATE_W                          150
+PUSH_PLATE_X0                         -75
+PUSH_PLATE_X1                          75
+PUSH_PLATE_Y0                         -55
+PUSH_PLATE_Y1                         -50
+PUSH_PLATE_Z0                         560
+PUSH_PLATE_Z1                         640
+PUSH_ROD_D                             12
+PUSH_STROKE                            80
+RAIL_LEN                              900
+RAIL_SQ                                20
+RAIL_Y                               -105
+RAIL_Z0                                20
+RAIL_Z1                               920
+ROD_Y0                               -135
+ROD_Y1                                -55
+SCREW_D                                12
+SCREW_LEN                             900
+SCREW_Y                              -175
+SCREW_Z0                               90
+SCREW_Z1                              990
+SLIDER_D                               56
+SLIDER_H                               80
+SLIDER_MIN_OFFSET                     150
+SLIDER_T                               24
+TOP_HOLE_CX                             0
+TOP_HOLE_CY                            20
+TOP_HOLE_D                             80
+TOP_HOLE_W                            250
+UNIT_SCALE                          0.001
