@@ -17,7 +17,11 @@ static const char* Test_URL = "https://jsonplaceholder.typicode.com/posts";
 static const String Test_JSON = R"({
     "title": "ESP32-S3 Test",
     "body": "Hello from ESP32-S3",
-    "userId": 1
+    "userId": 1,
+    "message":{
+        "first":"Hello JSON",
+        "second":"Hello C"
+    }
 })";
 
 //前置函数声明
@@ -72,6 +76,8 @@ static void HTTPSTestTask(void *pvParameters){
     //http正文
     String http_context = "";
 
+    //JSON信息
+
     //https证书 
     static WiFiClientSecure client;
 
@@ -98,7 +104,7 @@ static void HTTPSTestTask(void *pvParameters){
 
     //请求内容
     http_context = https.getString();
-    Serial.println(http_context);
+    //Serial.println(http_context);
 
     //发送内容
     //设置http头
@@ -106,8 +112,37 @@ static void HTTPSTestTask(void *pvParameters){
 
     //发送
     httpcode = https.POST(Test_JSON);
-    http_context = https.getString();
-    Serial.println(http_context);
+    
+    //JSON解析
+    if(httpcode > 0){
+
+        //接收信息
+        http_context = https.getString();
+        //Serial.println(http_context);
+
+        //创建JSON文档
+        static JsonDocument JSON_doc;
+
+        //解析
+        static DeserializationError JSON_error = deserializeJson(JSON_doc, http_context); //解析为数据结构
+
+        if(JSON_error){//检查JSON格式是否正确
+            Serial.println("It's not JSON");
+            Serial.println(JSON_error.c_str());//转化为c风格字符串
+        }
+        else{
+            const char* JSON_title = JSON_doc["title"];
+            const char* JSON_body = JSON_doc["body"];
+            const uint8_t JSON_userId = JSON_doc["userId"];
+            const char* JSON_msg = JSON_doc["message"]["second"];
+
+            Serial.println(JSON_title);
+            Serial.println(JSON_body);
+            Serial.println(JSON_userId);
+            Serial.println(JSON_msg);
+        }
+    }
+
 
     //结束会话
     https.end();
