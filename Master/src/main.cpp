@@ -11,7 +11,14 @@
 //测试网址
 
 //static const char* Test_URL = "https://api.deepseek.com";
-static const char* Test_URL = "https://httpbin.org/get";
+static const char* Test_URL = "https://jsonplaceholder.typicode.com/posts";
+
+//测试POST JSON
+static const String Test_JSON = R"({
+    "title": "ESP32-S3 Test",
+    "body": "Hello from ESP32-S3",
+    "userId": 1
+})";
 
 //前置函数声明
 static void HTTPSTestTask(void *pvParameters);
@@ -43,7 +50,7 @@ static void WiFiConnectTask(void *pvParameters){
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    xTaskCreatePinnedToCore(HTTPSTestTask, "HTTPS Test Task", 4096, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(HTTPSTestTask, "HTTPS Test Task", 32768, NULL, 1, NULL, 1);
 
     for(;;){
         if(WiFi.status() != WL_CONNECTED){
@@ -90,6 +97,15 @@ static void HTTPSTestTask(void *pvParameters){
     }
 
     //请求内容
+    http_context = https.getString();
+    Serial.println(http_context);
+
+    //发送内容
+    //设置http头
+    https.addHeader("Content-Type", "application/json");
+
+    //发送
+    httpcode = https.POST(Test_JSON);
     http_context = https.getString();
     Serial.println(http_context);
 
