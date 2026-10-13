@@ -7,8 +7,8 @@
 #include "SerialCmdLib.h"
 #include "SysInfoLib.h"
 
-// 全工程唯一引脚表
-#include "BoardConfig.h"
+// 全工程唯一配置来源（引脚/任务节奏/开关都在这里）
+#include "config.h"
 
 // =============================================================================
 // SmartBookShelf / Main —— 主控整合程序
