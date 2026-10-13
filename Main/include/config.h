@@ -177,10 +177,13 @@
 #define MAX_BOOK_RECORDS 12
 #endif
 
-// 屏上字体：中文用 simsun_16_cjk，英文数字用 montserrat_12
-// 改字号只改这两行（字体本身要在 include/lv_conf.h 里打开）
+// 屏上字体：中文用自己生成的全字库 ui_font_16，英文数字用 montserrat_12。
+// ⚠️ 不要再用 LVGL 自带的 lv_font_simsun_16_cjk：它只有 1097 个汉字，
+//    界面里的“识/别/书/测/距”等字不在里面，会显示成空白。
+// ui_font_16 由 Main/font/ui_font_16.c 提供（GB2312 一级汉字 3755 + 界面用字），
+// 重新生成见 Main/fontgen/README.md；开关在 include/lv_conf.h。
 #ifndef DISPLAY_FONT_CJK
-#define DISPLAY_FONT_CJK (&lv_font_simsun_16_cjk)
+#define DISPLAY_FONT_CJK (&ui_font_16)
 #endif
 #ifndef DISPLAY_FONT_ASCII
 #define DISPLAY_FONT_ASCII (&lv_font_montserrat_12)

@@ -32,6 +32,8 @@ Main/
 │  ├─ UltraLib/              ← HC-SR04 超声波测距（非阻塞状态机）
 │  └─ DFRobot_HuskylensV2/   ← 二哈底层驱动（vendor，离线可编译）
 ├─ src/main.cpp              ← 只做拼装：全局对象 / 命令注册 / 任务
+├─ src/ui_font_16.c          ← ★生成的中文字库（GB2312 一级 3755 字 + 界面用字）
+├─ fontgen/                  ← 字库生成脚本 + 说明（改字库看这里的 README）
 ├─ platformio.ini            ← N16R8 + TFT_eSPI(USER_SETUP) + LVGL 依赖（业务配置在 config.h）
 └─ README.md                 ← 本文件（库 API 文档）
 ```
@@ -340,7 +342,34 @@ SCCB SDA（也是 GPIO1）冲突。要“本地摄像头 + 二哈”同时用，
 > ⚠️ **ECHO 是 5V 输出，必须分压（1k + 2k）后再接 GPIO**，否则可能损坏 S3。
 > ⚠️ 超时按最远 4000mm 留了余量：往返约 23.3ms，`CFG_WAVE_TIMEOUT_US=38000`。
 
-### 8.3 本步验证方式
+### 8.3 中文字库（重要，踩过坑）
+
+**问题**：LVGL 自带的 `lv_font_simsun_16_cjk` 不是全字库，是用 `--symbols` 指定的固定子集，
+**只有 1097 个汉字**。本项目界面用到的 326 个字里 **135 个不在里面**，
+其中 35 个是屏幕可见的（识 / 别 / 书 / 测 / 距 / 态 / 记 / 录 …），所以屏上大片中文空白。
+
+**解决**：自己生成字库 `src/ui_font_16.c`
+（SimSun 16px / 2bpp / RLE / GB2312 一级汉字 3755 + 界面用字），
+开关与说明见 `fontgen/README.md`。改界面文字后跑：
+
+```powershell
+python tools\font_charset_check.py     # 查缺字，0 = 没有缺字
+```
+
+**两个必须同时满足的开关**（少一个就整屏空白）：
+
+| 位置 | 值 | 不设的后果 |
+| --- | --- | --- |
+| `include/lv_conf.h` | `#define UI_FONT_16 1` | 生成文件用 `#if UI_FONT_16` 包住数据，不定义则整份字库被预处理掉，链接报 undefined |
+| `include/lv_conf.h` | `#define LV_USE_FONT_COMPRESSED 1` | 字库是 RLE 压缩的，不开解压 LVGL 只打 warning 然后什么都不画 |
+
+另外 `platformio.ini` 必须有 `-DLV_LVGL_H_INCLUDE_SIMPLE`，
+生成的 `.c` 只在定义它时才 `#include "lvgl.h"`。
+
+开机 `display.begin()` 会跑 `fontSelfCheck()`：串口打印字库行高、是否压缩、
+缺字清单。看到 `自检通过: N 组词全部有字形` 就说明中文字库可用。
+
+### 8.4 本步验证方式
 
 本机没有 x86 编译器，所以纯逻辑用等价的 Python 仿真验证（脚本可复现）：
 

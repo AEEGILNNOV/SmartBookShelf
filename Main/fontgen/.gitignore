@@ -1,0 +1,4 @@
+# 生成字库用的中间产物，不入库
+SimSun-extracted.ttf
+_dump_*/
+font_info.json

@@ -3,6 +3,9 @@
 // 全工程唯一配置来源（刷屏缓冲行数 / 消息停留时间 / 任务栈与核心都在这里）
 #include "config.h"
 
+// 开机中文字库自检（缺字会打到串口）
+#include "FontCheck.h"
+
 // =============================================================================
 // DisplayLib 实现（LVGL 8.4 中文版）
 //
@@ -145,6 +148,9 @@ bool DisplayLib::begin() {
     s_dispDrv.full_refresh = 0;
     s_dispDrv.user_data = &_tft;
     lv_disp_drv_register(&s_dispDrv);
+
+    // 建界面前先查一遍中文字库：缺字会打到串口，避免"屏上有字但看不懂为什么空"
+    fontSelfCheck();
 
     createUi();
 
