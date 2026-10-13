@@ -149,8 +149,11 @@ bool DisplayLib::begin() {
     s_dispDrv.user_data = &_tft;
     lv_disp_drv_register(&s_dispDrv);
 
-    // 建界面前先查一遍中文字库：缺字会打到串口，避免"屏上有字但看不懂为什么空"
+    // 中文字库自检：默认关（CFG_FONT_SELFCHECK），要用在 config.h 里打开。
+    // 它同步跑在 setup 里，字库万一有问题会拖住启动，所以不默认开。
+#if CFG_FONT_SELFCHECK
     fontSelfCheck();
+#endif
 
     createUi();
 

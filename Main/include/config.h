@@ -177,13 +177,30 @@
 #define MAX_BOOK_RECORDS 12
 #endif
 
+// 中文字库开关：1 = 用生成的 ui_font_16；0 = 退回 LVGL 自带 simsun（只有 1097 字，会缺字）。
+// 排错用：怀疑字库导致屏不亮时先置 0，屏幕能亮就说明问题在字库。
+// 注意：置 0 时 lv_conf.h 里的 UI_FONT_16 要同时置 0，两边必须一致。
+#ifndef CFG_FONT_CUSTOM_CJK
+#define CFG_FONT_CUSTOM_CJK 1
+#endif
+
+// 开机中文字库自检：1 = 打开（把缺字打到串口）。默认关，
+// 因为它在 setup 里同步跑，万一字库有问题会拖住整个启动；要用再打开。
+#ifndef CFG_FONT_SELFCHECK
+#define CFG_FONT_SELFCHECK 0
+#endif
+
 // 屏上字体：中文用自己生成的全字库 ui_font_16，英文数字用 montserrat_12。
 // ⚠️ 不要再用 LVGL 自带的 lv_font_simsun_16_cjk：它只有 1097 个汉字，
 //    界面里的“识/别/书/测/距”等字不在里面，会显示成空白。
 // ui_font_16 由 Main/font/ui_font_16.c 提供（GB2312 一级汉字 3755 + 界面用字），
 // 重新生成见 Main/fontgen/README.md；开关在 include/lv_conf.h。
 #ifndef DISPLAY_FONT_CJK
+#if CFG_FONT_CUSTOM_CJK
 #define DISPLAY_FONT_CJK (&ui_font_16)
+#else
+#define DISPLAY_FONT_CJK (&lv_font_simsun_16_cjk)
+#endif
 #endif
 #ifndef DISPLAY_FONT_ASCII
 #define DISPLAY_FONT_ASCII (&lv_font_montserrat_12)

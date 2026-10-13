@@ -40,8 +40,16 @@
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_DEFAULT &lv_font_montserrat_14
 
-// 关掉自带的二级字库（只有 1097 字，不够用），改用下面我们自己生成的
+// 由 include/config.h 的 CFG_FONT_CUSTOM_CJK 决定用哪套中文：
+//   1 = 用生成的 ui_font_16（GB2312 一级 3755 字）
+//   0 = 退回 LVGL 自带子集字库（只有 1097 字，会缺字，但可用于排错）
+#include "config.h"
+
+#if CFG_FONT_CUSTOM_CJK
 #define LV_FONT_SIMSUN_16_CJK 0
+#else
+#define LV_FONT_SIMSUN_16_CJK 1
+#endif
 
 // 自己生成的中文字库：src/ui_font_16.c
 // 注意 1：lv_font_conv 生成的 .c 用 #if UI_FONT_16 包住全部数据，
@@ -49,8 +57,13 @@
 // 注意 2：生成的字体是 RLE 压缩的（.bitmap_format = 1），
 //         LVGL 只有在 LV_USE_FONT_COMPRESSED=1 时才会解压；
 //         不开这个开关它会打一句 warning 然后**什么都不画**（整屏空白）。
+#if CFG_FONT_CUSTOM_CJK
 #define UI_FONT_16 1
 #define LV_FONT_CUSTOM_DECLARE LV_FONT_DECLARE(ui_font_16)
+#else
+#define UI_FONT_16 0
+#define LV_FONT_CUSTOM_DECLARE
+#endif
 
 // 字库是 RLE 压缩的，必须开解压；解压缓冲按 "一行最多 256 像素" 申请，约 0.5KB
 #define LV_USE_FONT_COMPRESSED 1

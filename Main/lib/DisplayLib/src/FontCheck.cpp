@@ -1,5 +1,7 @@
 #include "FontCheck.h"
 
+#include "config.h"
+
 // =============================================================================
 // 字库自检实现
 //
@@ -82,14 +84,17 @@ static int probeWord(const lv_font_t *font, const char *utf8) {
 
 // 开机自检：返回缺字总数（0 = 可用）
 int fontSelfCheck(void) {
-    const lv_font_t *font = &ui_font_16;
+    // 用哪个字库由 config.h 的 DISPLAY_FONT_CUSTOM_CJK 决定，
+    // 关掉自定义字库时这里不能引用 ui_font_16（它根本没参与编译）
+    const lv_font_t *font = DISPLAY_FONT_CJK;
 
     // bpp / 压缩方式在“字体格式描述符”里，不在 lv_font_t 上
     // （lv_font_t.dsc 指向 lv_font_fmt_txt_dsc_t）
     const lv_font_fmt_txt_dsc_t *fdsc = (const lv_font_fmt_txt_dsc_t *)font->dsc;
 
-    Serial.println("--- 字库自检 (src/ui_font_16.c) ---");
-    Serial.printf("  字体: ui_font_16, 行高=%d, 压缩=%s\n",
+    Serial.printf("--- 字库自检 (%s) ---\n",
+                  CFG_FONT_CUSTOM_CJK ? "src/ui_font_16.c" : "LVGL 自带 simsun");
+    Serial.printf("  行高=%d, 压缩=%s\n",
                   (int)font->line_height,
                   (fdsc != nullptr &&
                    fdsc->bitmap_format == LV_FONT_FMT_TXT_COMPRESSED)
