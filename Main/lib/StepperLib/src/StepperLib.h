@@ -78,7 +78,7 @@ public:
     // 相对上电位置的累计步数（软限位用）
     int32_t position() const;
 
-    // 手动机动：把当前位置当零点
+    // 手动归零：把当前位置当作零点
     void resetPosition();
 
     // 软限位行程：允许 _posSteps 落在 [-range, +range]
