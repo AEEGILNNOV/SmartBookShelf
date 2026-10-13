@@ -15,7 +15,7 @@
 // =============================================================================
 // SmartBookShelf / Main —— 主控整合程序
 //
-// 这个文件只干四件事：建全局对象、建队列/互斥锁、注册串口命令、建任务。
+// 这个文件只干四件事：建全局对象，建队列/互斥锁，注册串口命令，建任务。
 // 真正的功能都在 lib/ 里：
 //   HuskyLib      二哈 I2C + 内置 CNN 识别结果读取
 //   DisplayLib    ILI9341 状态页/系统信息页/书列表页（自带 displayTask）
@@ -58,7 +58,7 @@ static Stepper28BYJ motor1(CFG_STEPPER_M1_ENABLE ? STEPPER_PINS_M1 : nullptr);
 static Stepper28BYJ motor2(CFG_STEPPER_M2_ENABLE ? STEPPER_PINS_M2 : nullptr);
 static Stepper28BYJ motor3(CFG_STEPPER_M3_ENABLE ? STEPPER_PINS_M3 : nullptr);
 
-// 按下标取电机：0 = M1推出, 1 = M2夹层, 2 = M3升降；传 -1 表示不指定
+// 按下标取电机：0 = M1推出, 1 = M2夹层, 2 = M3升降，传 -1 表示不指定
 static Stepper28BYJ *getMotor(int index) {
     switch (index) {
         case 0:
@@ -86,7 +86,7 @@ static SemaphoreHandle_t waveMutex = nullptr;
 static uint32_t waveFilterBuf[CFG_WAVE_FILTER_N > 0 ? CFG_WAVE_FILTER_N : 1] = {};
 static uint8_t waveFilterCount = 0;
 
-// 电机名字，打印用；下标 0~2 对应 motor1~motor3
+// 电机名字，打印用，下标 0~2 对应 motor1~motor3
 static const char *MOTOR_NAME[3] = { "M1推出", "M2夹层", "M3升降" };
 
 // 软限位行程，下标 0~2 对应 motor1~motor3
@@ -176,7 +176,7 @@ static void printBanner() {
     static const uint8_t m3pins[4] = CFG_STEPPER_M3_PINS;
     Serial.printf("测距: TRIG=%d ECHO=%d (ECHO 必须分压, 与M1冲突)\n",
                   PIN_WAVE_TRIG, PIN_WAVE_ECHO);
-    // 触摸是独立 5 根线，和屏的 SPI、和 TFT_eSPI 的 TOUCH_CS 都没关系
+    // 触摸是独立 5 根线，和屏的 SPI，和 TFT_eSPI 的 TOUCH_CS 都没关系
     Serial.printf("触摸: T_CS=%d T_IRQ=%d T_CLK=%d T_DIN=%d T_DO=%d (开关 CFG_ENABLE_TOUCH=%d)\n",
                   PIN_TOUCH_CS, PIN_TOUCH_IRQ, PIN_TOUCH_CLK, PIN_TOUCH_DIN,
                   PIN_TOUCH_DO, CFG_ENABLE_TOUCH);
@@ -289,10 +289,51 @@ static void cmdParam(const char *arg) {
     husky.dumpAlgoParam();
 }
 
+// 串口命令 b：书列表页 + 书单（动态数组）操作
+//   b          跳到书列表页并打印条数
+//   b,a        加一条测试书（没有二哈也能把列表/取出按钮/滑动试出来）
+//   b,a,8      加 8 条测试书（条数多到需要滑动）
+//   b,p        串口打印整张书单
 static void cmdBooks(const char *arg) {
+    char sub = (arg != nullptr && arg[0] != '\0') ? arg[0] : '\0';
+
+    if (sub == 'a' || sub == 'A') {
+        // 参数形如 "a" 或 "a,8"：取逗号后面的条数
+        int want = 1;
+        const char *comma = strchr(arg, ',');
+        if (comma != nullptr) {
+            want = atoi(comma + 1);
+        }
+        if (want < 1) {
+            want = 1;
+        }
+        if (want > 40) {
+            want = 40;  // 一次别加太多，够测滑动就行
+        }
+
+        static int16_t testSeq = 0;  // 测试数据编号，一直往上加
+        int16_t added = 0;
+        for (int i = 0; i < want; i++) {
+            char name[32];
+            testSeq++;
+            snprintf(name, sizeof(name), "测试书 %d", (int)testSeq);
+            if (display.addBook(name) >= 0) {
+                added++;
+            }
+        }
+        Serial.printf("书单: 已加 %d 条测试数据, 现在共 %d 条 (输入 b 看书列表页)\n",
+                      (int)added, (int)display.bookCount());
+        return;
+    }
+
+    if (sub == 'p' || sub == 'P') {
+        display.printBooks();
+        return;
+    }
+
     Serial.printf("已记录书数: %d\n", (int)display.bookCount());
-    display.nextPage();
     display.setPage(PAGE_BOOKS);
+    Serial.println("屏幕切到书列表页: 每行右边是“取出”按钮, 列表可以上下滑动");
 }
 
 static void cmdClearBooks(const char *arg) {
@@ -301,7 +342,7 @@ static void cmdClearBooks(const char *arg) {
 }
 
 // 解析步进命令：[电机号,]动作。line 形如 "1,300" / "1,-300" / "z" / "s1500"
-// 返回去掉“电机号,”之后的动作串；*outIndex 回填 0~2，没写电机号就保持原值。
+// 返回去掉“电机号,”之后的动作串，*outIndex 回填 0~2，没写电机号就保持原值。
 static char *parseMotorCmd(char *line, int *outIndex) {
     int first = atoi(line);  // 字符串开头不是数字时 atoi 返回 0
     if (line[0] >= '1' && line[0] <= '3' && first >= 1 && first <= 3) {
@@ -382,7 +423,7 @@ static void printStepperState() {
 //
 // 串口/按键只往 MotorQueue 投命令，本任务消费命令并推进电机状态机。
 // 一次只服务一台电机（runMotor 里会先停掉其它电机），避免三台同时走步把
-// 电流和 CPU 都拉满；真要同时动再改成每台一个 service()。
+// 电流和 CPU 都拉满，真要同时动再改成每台一个 service()。
 // =============================================================================
 static void stepperTask(void *pvParameters) {
     Serial.println("步进任务: 已启动");
@@ -514,7 +555,8 @@ static void registerCommands() {
     cli.registerCommand('w', "保存知识库(默认槽位0, 支持 w,1)", cmdSaveSlot);
     cli.registerCommand('o', "读取知识库(默认槽位0, 支持 o,1)", cmdLoadSlot);
     cli.registerCommand('p', "读算法参数(调试OCR)", cmdParam);
-    cli.registerCommand('b', "看书列表页并打印数量", cmdBooks);
+    cli.registerCommand('b', "书列表页: b 看列表页, b,a[,N] 加N条测试书, b,p 打印书单",
+                        cmdBooks);
     cli.registerCommand('c', "清空书列表记录", cmdClearBooks);
     cli.registerCommand('m', "步进电机(手动调试): m 看用法, m,1,300 / m,z", cmdMotor);
     cli.registerCommand('z', "步进急停: z 全停, z,2 停电机2", cmdStopMotor);
@@ -554,7 +596,7 @@ static void handleButtonEvent(const ButtonEvent &event) {
             cli.sendCommand("l");
             Serial.println("按键3: 学习当前目标");
             break;
-        // 说明书里的 A/B 两个键：A 取书、B 还书。
+        // 说明书里的 A/B 两个键：A 取书，B 还书。
         // 现在机械还没接，先把它们接到测距的“记起点 / 算厚度”上，
         // 等 stepperTask 能整套动作时，把 sendCommand 换成取书/还书流程即可。
         case 4:
@@ -644,8 +686,8 @@ static void recogTask(void *pvParameters) {
 // 超声波测距任务（HC-SR04）：唯一接触 TRIG/ECHO 的任务
 //
 // 非阻塞流程：
-//   1) 每 WAVE_MEASURE_INTERVAL_MS 发起一次测量（手册建议间隔 >60ms）；
-//   2) 每 1ms 推进一次状态机（update 里从不死等）；
+//   1) 每 WAVE_MEASURE_INTERVAL_MS 发起一次测量（手册建议间隔 >60ms），
+//   2) 每 1ms 推进一次状态机（update 里从不死等），
 //   3) 出结果后做量程过滤 + 滑动平均，写进 waveState（waveMutex 保护）。
 // =============================================================================
 static void waveTask(void *pvParameters) {
@@ -791,7 +833,7 @@ static void printWaveState() {
     }
 }
 
-// 串口命令 u：超声波测距（u = Ultrasonic；不能用 w，w 是保存知识库）
+// 串口命令 u：超声波测距（u = Ultrasonic，不能用 w，w 是保存知识库）
 //   u        打印一次当前测距状态
 //   u,s      记录“开始测量厚度”的起点（把书放上去之前先按）
 //   u,e      结束测量：厚度 = 起点距离 - 当前距离
@@ -881,7 +923,7 @@ static void cmdWave(const char *arg) {
 //   d,6      打印触摸原始值（不做窗口过滤，看芯片回的是 0 / 4095 / 真实值）
 //
 // 判读：彩条能出来 -> 屏/背光/接线/SPI 都是好的，问题在 LVGL 这一层
-//       彩条也没有 -> 和 LVGL、字库都无关，查背光/接线/供电/屏型号
+//       彩条也没有 -> 和 LVGL，字库都无关，查背光/接线/供电/屏型号
 static void cmdDisplay(const char *arg) {
     if (arg != nullptr && arg[0] == '1') {
         display.requestRawTest(CFG_SELFTEST_BAR_HOLD_MS);
@@ -1010,7 +1052,7 @@ void setup() {
     }
 
     // ---- 步进电机初始化 ----
-    // 三台电机共用一套速度；每台按 config.h 的行程设软限位。
+    // 三台电机共用一套速度，每台按 config.h 的行程设软限位。
     // 没接线的电机（ENABLE=0）这里会直接跳过，不会碰 GPIO。
     if (CFG_RUN_STEPPER) {
         MotorQueue = xQueueCreate(CFG_STEPPER_QUEUE_SIZE, CFG_STEPPER_CMD_LEN);
@@ -1042,7 +1084,7 @@ void setup() {
     sysInfoPrint(systemInfo);
 
     // ---- 建任务 ----
-    // recogTask 独占二哈 I2C，放核心 1；其它都在核心 0。
+    // recogTask 独占二哈 I2C，放核心 1，其它都在核心 0。
     // 栈/优先级/核心全部来自 config.h 的 CFG_STACK_xxx / CFG_PRIO_xxx / CFG_CORE_xxx，
     // 不要在这里写死数字。
 #if CFG_ENABLE_HUSKY

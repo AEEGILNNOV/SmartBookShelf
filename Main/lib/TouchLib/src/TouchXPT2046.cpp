@@ -7,9 +7,9 @@
 // TouchLib 实现（XPT2046，位操作，独立 5 根线）
 //
 // 时序（和参考工程 Touch_XPT2046.hpp 完全一致，不要随手改）：
-//   1) 拉低 CS，按位移出 8 位控制字节（0xD0 读 X / 0x90 读 Y），MSB 先出；
-//   2) 等 6us（XPT2046 需要一段转换时间），再给一个空时钟；
-//   3) 读 12 位结果（MSB 先出）：先给低电平再拉高，在上升沿后采 DO；
+//   1) 拉低 CS，按位移出 8 位控制字节（0xD0 读 X / 0x90 读 Y），MSB 先出，
+//   2) 等 6us（XPT2046 需要一段转换时间），再给一个空时钟，
+//   3) 读 12 位结果（MSB 先出）：先给低电平再拉高，在上升沿后采 DO，
 //   4) 拉高 CS 结束。
 // 每个轴采 CFG_TOUCH_SAMPLES 次取平均，压一下抖动。
 // =============================================================================
@@ -100,7 +100,7 @@ void TouchXPT2046::readRaw(uint16_t *x, uint16_t *y, uint16_t *z) {
 }
 
 // 压力值 Z：XPT2046 用 Z1(0xB0)/Z2(0xC0) 两个通道差分算出来，和 TFT_eSPI 的算法一致。
-// 值越大 = 按得越重；读到 4095（0xFFF）表示“其实没按”，TFT_eSPI 也把它当 0。
+// 值越大 = 按得越重，读到 4095（0xFFF）表示“其实没按”，TFT_eSPI 也把它当 0。
 uint16_t TouchXPT2046::readPressure() {
     if (_cs < 0) {
         _lastZ = 0;
@@ -140,7 +140,7 @@ int TouchXPT2046::irqLevel() {
 
 // 读一次触点：
 //   1) 先看坐标在不在窗口内（不在 = 没人按，这样空闲时不用白读压力，省时间）
-//   2) 再看压力够不够（CFG_TOUCH_PRESSURE_MIN = 灵敏度/触发阈值）
+//   2) 再看压力够不够（CFG_TOUCH_PRESSURE_MIN = 灵敏度/触发门限）
 bool TouchXPT2046::read(uint16_t *x, uint16_t *y) {
     if (_cs < 0) {
         return false;
@@ -165,7 +165,7 @@ bool TouchXPT2046::read(uint16_t *x, uint16_t *y) {
         return false;
     }
 
-    // 压力阈值：这就是“灵敏度”。调大 = 要按得更重才认，调 0 = 不判压力。
+    // 压力门限：这就是“灵敏度”。调大 = 要按得更重才认，调 0 = 不判压力。
     uint16_t z = readPressure();
     if (z < CFG_TOUCH_PRESSURE_MIN) {
         return false;
@@ -178,10 +178,10 @@ bool TouchXPT2046::read(uint16_t *x, uint16_t *y) {
 
 void TouchXPT2046::printConfig() const {
     Serial.printf("触摸(XPT2046): T_CS=%d T_IRQ=%d T_CLK=%d T_DIN=%d T_DO=%d | "
-                  "坐标窗口 %d~%d, 压力阈值 %d, 每轴采样 %d 次\n",
+                  "坐标窗口 %d~%d, 压力门限 %d, 每轴采样 %d 次\n",
                   _cs, _irq, _clk, _din, _miso, CFG_TOUCH_RAW_MIN,
                   CFG_TOUCH_RAW_MAX, CFG_TOUCH_PRESSURE_MIN, CFG_TOUCH_SAMPLES);
-    Serial.printf("  灵敏度=压力阈值 %d（调大=按更重才触发）；轴方向 SWAP_XY=%d INVERT_X=%d INVERT_Y=%d\n",
+    Serial.printf("  灵敏度=压力门限 %d（调大=按更重才触发），轴方向 SWAP_XY=%d INVERT_X=%d INVERT_Y=%d\n",
                   CFG_TOUCH_PRESSURE_MIN, CFG_TOUCH_SWAP_XY, CFG_TOUCH_INVERT_X,
                   CFG_TOUCH_INVERT_Y);
 }

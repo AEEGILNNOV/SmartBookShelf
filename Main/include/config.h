@@ -7,9 +7,9 @@
 // SmartBookShelf / Main —— 全工程唯一配置来源（config.h）
 //
 // 【怎么用】
-//   1. 想改任何参数（引脚、任务节奏、队列长度、开关），只改本文件；
+//   1. 想改任何参数（引脚，任务节奏，队列长度，开关），只改本文件，
 //   2. 也可以用 platformio.ini 的 build_flags 里的 -DXXX=yyy 临时覆盖，
-//      因为下面**每一个宏都用 #ifndef 包住**（-D 的优先级更高）；
+//      因为下面**每一个宏都用 #ifndef 包住**（-D 的优先级更高），
 //   3. 库和 main.cpp 一律 #include "config.h"，不要各自写一份默认值。
 //
 // 【包含顺序（重要）】
@@ -28,7 +28,7 @@
 //   GPIO 22-25  该芯片上不存在
 //   GPIO 19/20  原生 USB D-/D+（留给烧录与监视）
 //   GPIO 43/44  UART0 控制台
-//   实际可用：GPIO 0-18、38-42、45-48
+//   实际可用：GPIO 0-18，38-42，45-48
 //
 // 【引脚占用总表（改线只改这里）】
 //   ILI9341 屏   SCLK=12 MOSI=11 CS=10 DC=9 RST=8 BL=47（MISO 不接）
@@ -37,7 +37,7 @@
 //   触摸 XPT2046 T_CS=38 T_IRQ=39 T_CLK=40 T_DIN=41 T_DO=42（独立 5 线，见第 3.2 节）
 //   步进电机1    4,5,6,7                     （ULN2003 的 IN1~IN4）
 //   步进电机2    15,16,17,18                 （ULN2003 的 IN1~IN4）
-//   步进电机3    38,39,48,21                 （机械到位后再接；38/39 与触摸冲突，二选一）
+//   步进电机3    38,39,48,21                 （机械到位后再接，38/39 与触摸冲突，二选一）
 //   HC-SR04      TRIG=4 ECHO=5               （与电机1冲突，二选一，见第 8 节）
 //   空闲未用     3,13,14,20,48,21 …
 // =============================================================================
@@ -46,7 +46,7 @@
 // -----------------------------------------------------------------------------
 // 1. 模块总开关
 //
-// 置 0 的模块不建任务、不初始化，省 RAM 也便于分步排查。
+// 置 0 的模块不建任务，不初始化，省 RAM 也便于分步排查。
 // 用法示例：-DCFG_ENABLE_STEPPER=0  临时关掉步进
 // -----------------------------------------------------------------------------
 #ifndef CFG_ENABLE_HUSKY
@@ -189,21 +189,21 @@
 // 背光电平：
 //   0 = 高电平点亮（默认，和 TFT_eSPI 的 TFT_BACKLIGHT_ON=1 一致）
 //   1 = 低电平点亮（少数模块的 LED 是低有效，或者 BL 线接到了反相驱动）
-// 怎么判断：串口敲 d,4 让背光闪 3 次——如果“关”的时候亮、“开”的时候灭，
-//           就把这里改成 1；也可以直接敲 d,5 现场对调电平看哪个亮。
+// 怎么判断：串口敲 d,4 让背光闪 3 次——如果“关”的时候亮，“开”的时候灭，
+//           就把这里改成 1，也可以直接敲 d,5 现场对调电平看哪个亮。
 #ifndef CFG_TFT_BL_ACTIVE_LOW
 #define CFG_TFT_BL_ACTIVE_LOW 0
 #endif
 
 // LVGL 刷屏缓冲：2 块 240x40 的 16 位缓冲 ≈ 19.2KB
 // 这一项就是 DisplayLib.cpp 里刷屏缓冲的行数（原来叫 DISPLAY_DRAW_LINES，已合并过来）。
-// 屏幕出现横向撕裂/闪烁就往下调到 20；内部 RAM 更紧就往上调到 80。
+// 屏幕出现横向撕裂/闪烁就往下调到 20，内部 RAM 更紧就往上调到 80。
 #ifndef CFG_LV_BUF_LINES
 #define CFG_LV_BUF_LINES 40
 #endif
 
 // 刷屏缓冲放哪：1 = PSRAM(ps_malloc，原来的写法)   0 = 内部 RAM
-// S3 的 TFT_eSPI 走 CPU 搬运像素，两者都能用；屏上出现随机噪点/花屏时，
+// S3 的 TFT_eSPI 走 CPU 搬运像素，两者都能用，屏上出现随机噪点/花屏时，
 // 可以改成 0 用内部 RAM 试（内部 RAM 更快，两块约 38KB，够用）。
 #ifndef CFG_LV_BUF_IN_PSRAM
 #define CFG_LV_BUF_IN_PSRAM 1
@@ -222,7 +222,7 @@
 // 3.1 屏幕排错（分层点亮：一次只验证一层，别一上来就怀疑字库）
 //
 // 为什么要有这一段：LVGL 界面的“整屏没内容”和“字库缺字”是两回事——
-// 缺字只会让某几个汉字变空白，标题栏底色、页面背景这些不用字体的东西照样会画。
+// 缺字只会让某几个汉字变空白，标题栏底色，页面背景这些不用字体的东西照样会画。
 // 所以“整屏全黑/全白”一定不在字库这一层，按下面的顺序往下查：
 //
 //   CFG_DISPLAY_BRINGUP
@@ -234,8 +234,8 @@
 //     3 = 彩条 + LVGL 纯色块 + 完整中文界面（等于 0 再加一次开机彩条）
 //
 // 判读表：
-//   彩条能出来、界面不出来 -> 硬件这条链是好的，问题在 LVGL/字体层
-//   彩条也没有            -> 和 LVGL、字库都无关，查背光/接线/驱动型号
+//   彩条能出来，界面不出来 -> 硬件这条链是好的，问题在 LVGL/字体层
+//   彩条也没有            -> 和 LVGL，字库都无关，查背光/接线/驱动型号
 //
 // 对应的一键环境（platformio.ini 里已经配好）：
 //   pio run -e screen-raw  -t upload    只用彩条，不进 LVGL
@@ -278,8 +278,8 @@
 // 【为什么以前完全没反应】不是接线坏，是代码里压根没有这一路：
 //   · 本工程的触摸**不走屏的 SPI**，用的是触摸模块自己的 T_CLK/T_DIN/T_DO 三根线，
 //     再配 T_CS/T_IRQ，由 lib/TouchLib 的 TouchXPT2046 位操作驱动（和
-//     LVGLin240320TFTLCD 参考工程同一套，已在硬件上验证过）；
-//   · 所以 platformio.ini 里的 -DTFT_MISO=-1 / -DTOUCH_CS=-1 都不用动；
+//     LVGLin240320TFTLCD 参考工程同一套，已在硬件上验证过），
+//   · 所以 platformio.ini 里的 -DTFT_MISO=-1 / -DTOUCH_CS=-1 都不用动，
 //   · 以前缺的是第 3 步：DisplayLib 从来没有注册 LVGL 输入设备(lv_indev)，
 //     就算读到了坐标，按钮也收不到点击。
 //
@@ -288,7 +288,7 @@
 //     T_CLK -> GPIO40      T_DIN -> GPIO41      T_DO -> GPIO42
 //
 // ⚠️ **GPIO38/39 同时是步进电机3 的引脚**（CFG_STEPPER_M3_PINS）。电机3 默认关着，
-//    两者只能二选一；同时打开会在编译期直接报错（见本节末尾的体检）。
+//    两者只能二选一，同时打开会在编译期直接报错（见本节末尾的体检）。
 // -----------------------------------------------------------------------------
 #ifndef CFG_ENABLE_TOUCH
 #define CFG_ENABLE_TOUCH 1        // 1 = 注册 LVGL 输入设备 + 显示触摸测试页
@@ -312,7 +312,7 @@
 #endif
 
 // 原始值有效窗口：落在窗口外当成“没按”。按面板边缘没反应就把窗口放宽。
-// ⚠️ 这个窗口只管“坐标像不像有效触摸”，**管不了灵敏度**，灵敏度看下面的压力阈值。
+// ⚠️ 这个窗口只管“坐标像不像有效触摸”，**管不了灵敏度**，灵敏度看下面的压力门限。
 #ifndef CFG_TOUCH_RAW_MIN
 #define CFG_TOUCH_RAW_MIN 50
 #endif
@@ -320,7 +320,7 @@
 #define CFG_TOUCH_RAW_MAX 4045
 #endif
 
-// ==== 触发阈值（= 灵敏度）====
+// ==== 触发门限（= 灵敏度）====
 // 判据是 XPT2046 的压力读数 Z（Z1/Z2 差分）：按得越重，Z 越大。
 //   Z >= CFG_TOUCH_PRESSURE_MIN 才算“真的按下了”。
 //
@@ -330,16 +330,16 @@
 //   · 设 0 = 不判压力，只看坐标窗口（回到之前“一碰就触发”的行为）
 //
 // 怎么定一个合适的数：按住屏幕敲 d,6 或 d，看“Z=”那一列的实测值：
-//   · 轻轻碰一下的最大 Z   —— 阈值要比它明显大
-//   · 正常按一下的稳定 Z   —— 阈值要比它明显小
-//   两个数之间取中间值即可；默认 600 是 TFT_eSPI 的经验值（XPT2046 常见范围 200~2000）。
+//   · 轻轻碰一下的最大 Z   —— 门限要比它明显大
+//   · 正常按一下的稳定 Z   —— 门限要比它明显小
+//   两个数之间取中间值即可，默认 600 是 TFT_eSPI 的经验值（XPT2046 常见范围 200~2000）。
 #ifndef CFG_TOUCH_PRESSURE_MIN
 #define CFG_TOUCH_PRESSURE_MIN 600
 #endif
 
 // XPT2046 原始值 -> 屏幕坐标的轴方向（照抄参考工程里已经验证过的一组）
-// 现象对照：左右反了改 TOUCH_INVERT_X；上下反了改 TOUCH_INVERT_Y；
-//           手指上下动、屏幕光标左右跑，就把 TOUCH_SWAP_XY 改成 1。
+// 现象对照：左右反了改 TOUCH_INVERT_X，上下反了改 TOUCH_INVERT_Y，
+//           手指上下动，屏幕光标左右跑，就把 TOUCH_SWAP_XY 改成 1。
 #ifndef CFG_TOUCH_SWAP_XY
 #define CFG_TOUCH_SWAP_XY 0
 #endif
@@ -365,6 +365,21 @@
 #define CFG_TOUCH_TEST_MAX 9999
 #endif
 
+// ==== 屏幕最下方屏蔽的高度(px)：这一段不响应触摸，防止误触 ====
+// 滑到最后一行时手指容易蹭到屏幕边缘，这里直接把底部一段判成"没按"。
+// 0 = 不屏蔽。注意书列表页的容器高度会主动避开这一段，所以不会挡住按钮。
+#ifndef CFG_TOUCH_BOTTOM_MASK_PX
+#define CFG_TOUCH_BOTTOM_MASK_PX 20
+#endif
+
+// ==== 滑动限制 ====
+// LVGL 的 scroll_limit = "手指要先移动多少像素才算滑动（否则算点击）"。
+// 0 = 解除限制，手指一动就滑动（列表手感最跟手，但按钮容错变小）。
+// 如果发现按钮变得不好点（手一抖就变成滚动而不是点击），把它设成 10~20。
+#ifndef CFG_TOUCH_SCROLL_LIMIT
+#define CFG_TOUCH_SCROLL_LIMIT 0
+#endif
+
 // ---- 编译期体检 ----
 // 触摸引脚和步进电机3 抢 GPIO38/39：两个都开一定不工作，直接拦下来
 #if CFG_ENABLE_TOUCH && CFG_STEPPER_M3_ENABLE && (PIN_TOUCH_CS == 38 || PIN_TOUCH_IRQ == 39)
@@ -376,11 +391,42 @@
                        (PIN_TOUCH_DIN >= 0) && (PIN_TOUCH_DO >= 0))
 
 // 一页最多记录几本书（按 ID + 书名去重）
+// ⚠️ 已被"动态数组书单"取代（见第 3.3 节 CFG_BOOKLIST_*），这里只留给老代码兼容
 #ifndef MAX_BOOK_RECORDS
 #define MAX_BOOK_RECORDS 12
 #endif
 
-// 中文字库开关：1 = 用生成的 ui_font_16；0 = 退回 LVGL 自带 simsun（只有 1097 字，会缺字）。
+
+// -----------------------------------------------------------------------------
+// 3.3 书单（动态数组 BookList）
+//
+// 识别到的书会进 lib/BookListLib 的动态数组：容量不够就 realloc 翻倍，
+// 书列表页按顺序显示每一条，每条右边有一个"取出"按钮把它移出列表。
+// 内存是运行期按需申请的，所以下面这几个数只影响"起点"和"上限"，不影响功能。
+// -----------------------------------------------------------------------------
+// 初始容量（条）。第一次 begin() 就申请这么多，装不下自动翻倍
+#ifndef CFG_BOOKLIST_INIT_CAP
+#define CFG_BOOKLIST_INIT_CAP 4
+#endif
+
+// 容量上限（条）。防止识别出乱码时无限扩容把堆吃光，设 0 = 不限制
+// 一条 BookItem 约 44 字节，64 条约 2.8KB，放内部 RAM 毫无压力
+#ifndef CFG_BOOKLIST_MAX
+#define CFG_BOOKLIST_MAX 64
+#endif
+
+// 显示任务一次能拷多少条快照去画（书列表页最多显示这么多行，其余不显示）
+// 24 行 x 44 字节 ≈ 1KB，作为 DisplayLib 的成员常驻，不占任务栈
+#ifndef CFG_BOOKLIST_SNAP_MAX
+#define CFG_BOOKLIST_SNAP_MAX 24
+#endif
+
+// 书列表页每一行的高度(px)：行里放"序号 + 书名"和一个"取出"按钮
+#ifndef CFG_BOOK_ROW_H
+#define CFG_BOOK_ROW_H 34
+#endif
+
+// 中文字库开关：1 = 用生成的 ui_font_16，0 = 退回 LVGL 自带 simsun（只有 1097 字，会缺字）。
 // 排错用：怀疑字库导致屏不亮时先置 0，屏幕能亮就说明问题在字库。
 // 注意：置 0 时 lv_conf.h 里的 UI_FONT_16 要同时置 0，两边必须一致。
 #ifndef CFG_FONT_CUSTOM_CJK
@@ -388,7 +434,7 @@
 #endif
 
 // 开机中文字库自检：1 = 打开（把缺字打到串口）。默认关，
-// 因为它在 setup 里同步跑，万一字库有问题会拖住整个启动；要用再打开。
+// 因为它在 setup 里同步跑，万一字库有问题会拖住整个启动，要用再打开。
 #ifndef CFG_FONT_SELFCHECK
 #define CFG_FONT_SELFCHECK 0
 #endif
@@ -397,7 +443,7 @@
 // ⚠️ 不要再用 LVGL 自带的 lv_font_simsun_16_cjk：它只有 1097 个汉字，
 //    界面里的“识/别/书/测/距”等字不在里面，会显示成空白。
 // ui_font_16 由 Main/font/ui_font_16.c 提供（GB2312 一级汉字 3755 + 界面用字），
-// 重新生成见 Main/fontgen/README.md；开关在 include/lv_conf.h。
+// 重新生成见 Main/fontgen/README.md，开关在 include/lv_conf.h。
 #ifndef DISPLAY_FONT_CJK
 #if CFG_FONT_CUSTOM_CJK
 #define DISPLAY_FONT_CJK (&ui_font_16)
@@ -463,7 +509,7 @@
 #define HUSKY_I2C_ADDR 0x50
 #endif
 
-// I2C 时钟(Hz)。库每次收发都会重新设时钟；通信不稳先降到 50000。
+// I2C 时钟(Hz)。库每次收发都会重新设时钟，通信不稳先降到 50000。
 #ifndef HUSKY_I2C_HZ
 #define HUSKY_I2C_HZ 100000
 #endif
@@ -510,9 +556,9 @@
 #define HUSKY_WORD_MAX 8
 #endif
 
-// 累计读超时多少次就判一次掉线、走重连流程
+// 累计读超时多少次就判一次掉线，走重连流程
 // ⚠️ 目前 recogTask 是按“累计错误数的整数倍”判的（errorCount % HUSKY_ERROR_LIMIT），
-//    不是严格的“连续 N 次”；等接线实测稳定后再按这个宏改成连续计数。
+//    不是严格的“连续 N 次”，等接线实测稳定后再按这个宏改成连续计数。
 #ifndef HUSKY_ERROR_LIMIT
 #define HUSKY_ERROR_LIMIT 3
 #endif
@@ -529,7 +575,7 @@
 // ⚠️ 原配置是 40/41/42，但 40/41/42 同时是 OV2640 的 D5/D6/D7，
 //    且和步进电机2（15/16/17/18）不冲突，本工程已把按键挪到 45/46/0。
 // ⚠️ 按键 3 = GPIO0 是 BOOT 脚：芯片复位时若被按下会进下载模式。
-//    正常上电后再按没问题；如果你觉得别扭，改成空闲脚即可：
+//    正常上电后再按没问题，如果你觉得别扭，改成空闲脚即可：
 //    -DBUTTON_PIN3=48  （或 21/38/39，注意别和电机3冲突）
 // GPIO0 在 DevKitC 上有外部上拉，强烈建议按下为“低电平”：
 //    -DBUTTON_TRUE_VALUE=0
@@ -560,7 +606,7 @@
 #define BUTTON_TRUE_VALUE 1
 #endif
 
-// 消抖移位历史位数：低 N 位全 1 判按下、全 0 判松开（2~8，越大越迟钝）
+// 消抖移位历史位数：低 N 位全 1 判按下，全 0 判松开（2~8，越大越迟钝）
 #ifndef BUTTON_DEBOUNCE_BITS
 #define BUTTON_DEBOUNCE_BITS 4
 #endif
@@ -609,8 +655,8 @@
 // 7. 任务节奏 / 优先级 / 栈 / 核心分配
 //
 // ⚠️ 总线独占规则（不要破坏）：
-//   - 只有 DisplayLib 的 displayTask 碰屏幕和 LVGL；
-//   - 只有 HuskyLib 的调用者（recogTask）碰二哈 I2C；
+//   - 只有 DisplayLib 的 displayTask 碰屏幕和 LVGL，
+//   - 只有 HuskyLib 的调用者（recogTask）碰二哈 I2C，
 //   - 只有 StepperLib 的调用者（stepperTask）碰电机引脚。
 // 想改核心分配，从下面的 CFG_xxx_CORE 宏改，不要散落在 xTaskCreatePinnedToCore。
 // -----------------------------------------------------------------------------
@@ -624,7 +670,7 @@
 #define SYSINFO_PRINT_EVERY 10        // 每采集 N 次打印一行系统信息到串口
 #endif
 #ifndef STEPPER_SERVICE_INTERVAL_MS
-#define STEPPER_SERVICE_INTERVAL_MS 2 // 步进任务服务周期（越小越快、越吃 CPU）
+#define STEPPER_SERVICE_INTERVAL_MS 2 // 步进任务服务周期（越小越快，越吃 CPU）
 #endif
 #ifndef WAVE_MEASURE_INTERVAL_MS
 #define WAVE_MEASURE_INTERVAL_MS 100  // HC-SR04 发起测量的间隔（手册建议 >60ms）
@@ -717,7 +763,7 @@
 //
 // ⚠️ 引脚冲突：ECHO 规划在 GPIO4，而电机1 的 IN1~IN4 = 4/5/6/7 也用到 4。
 //    同一时间只能接一个：
-//      · 先做测距：保持 TRIG=4 ECHO=5，并把 CFG_ENABLE_STEPPER 置 0；
+//      · 先做测距：保持 TRIG=4 ECHO=5，并把 CFG_ENABLE_STEPPER 置 0，
 //      · 先做电机：把 ECHO 挪到空闲脚（如 -DPIN_WAVE_TRIG=39 -DPIN_WAVE_ECHO=48）。
 // ⚠️ HC-SR04 的 ECHO 输出是 5V，直接接 GPIO 会伤芯片，中间必须分压（1k+2k）。
 // -----------------------------------------------------------------------------
@@ -772,7 +818,7 @@
 //
 // ⚠️ 电机2(15/16/17/18) 与按键原引脚(40/41/42)不冲突，但电机1(4/5/6/7)
 //    与 HC-SR04 的 TRIG=4/ECHO=5 冲突，见第 8 节。
-// ⚠️ 电机3(38/39/48/21)：38/39/48/21 当前空闲，可接；机械到位前可以先不接线，
+// ⚠️ 电机3(38/39/48/21)：38/39/48/21 当前空闲，可接，机械到位前可以先不接线，
 //    只在 CFG_ENABLE_STEPPER 里关掉，或把对应 CFG_STEPPER_M3_ENABLE 置 0。
 // -----------------------------------------------------------------------------
 #ifndef CFG_STEPPER_DRIVER
@@ -803,7 +849,7 @@
 #define CFG_STEPPER_M3_ENABLE 0
 #endif
 
-// 步进模式：0 = 八拍（半拍，力矩大、更平滑）  1 = 四拍（单四拍，简单）
+// 步进模式：0 = 八拍（半拍，力矩大，更平滑）  1 = 四拍（单四拍，简单）
 #ifndef CFG_STEPPER_WAVE_MODE
 #define CFG_STEPPER_WAVE_MODE 0
 #endif
@@ -860,7 +906,7 @@
 #endif
 
 // 42 步进驱动器的 EN（使能）脚是否低有效。
-// 常见模块（A4988/DRV8825/TMC 系）都是低有效，所以默认 1；
+// 常见模块（A4988/DRV8825/TMC 系）都是低有效，所以默认 1，
 // 如果你的模块是高有效，改成 0。
 #ifndef CFG_STEPPER_EN_ACTIVE_LOW
 #define CFG_STEPPER_EN_ACTIVE_LOW 1
@@ -883,7 +929,7 @@
 
 
 // -----------------------------------------------------------------------------
-// 10. 记忆/机械关键尺寸（来自 Model/README.md，业务判断阈值放这里）
+// 10. 记忆/机械关键尺寸（来自 Model/README.md，业务判断门限放这里）
 // -----------------------------------------------------------------------------
 // 推出孔下沿固定高度(mm)与有效高度范围(mm)
 #ifndef CFG_SLOT_BOTTOM_MM
@@ -932,7 +978,7 @@
 // 12. 日志宏（统一入口，方便以后整体关掉）
 //
 //   CFG_LOG(2, "系统信息: ram=%uKB\n", ramKb);
-//   等级 >= CFG_LOG_LEVEL 才真的打印；CFG_LOG_LEVEL=0 时连编译都不进。
+//   等级 >= CFG_LOG_LEVEL 才真的打印，CFG_LOG_LEVEL=0 时连编译都不进。
 // -----------------------------------------------------------------------------
 #define CFG_LOG_NONE  0
 #define CFG_LOG_ERROR 1
@@ -978,6 +1024,9 @@
 #endif
 #ifndef TOUCHLIB_VERSION
 #define TOUCHLIB_VERSION "1.0.0"
+#endif
+#ifndef BOOKLISTLIB_VERSION
+#define BOOKLISTLIB_VERSION "1.0.0"
 #endif
 
 

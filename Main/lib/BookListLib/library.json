@@ -1,0 +1,11 @@
+{
+  "name": "BookListLib",
+  "version": "1.0.0",
+  "description": "书单：动态数组（malloc/realloc 扩容）+ 互斥锁保护，供识别任务增、显示任务取快照/删",
+  "keywords": "list, dynamic array, esp32",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "srcDir": "src"
+  }
+}

@@ -9,6 +9,7 @@
 #include "HuskyLib.h"
 #include "SysInfoLib.h"
 #include "UltraLib.h"
+#include "BookList.h"
 
 // =============================================================================
 // DisplayLib —— 显示库（2.8" SPI ILI9341 240x320 竖屏 + LVGL 8.4 中文界面）
@@ -47,12 +48,8 @@
 #define SCR_H TFT_HEIGHT
 #endif
 
-// 已识别书的累计记录（按 ID + 内容去重，用于“扫多本书”）
-struct BookRecord {
-    int16_t id;
-    uint16_t count;                        // 出现次数
-    char text[HUSKY_TEXT_LEN];             // 书名/文字内容，可能为空
-};
+// 已识别书的累计记录：数据放在 BookListLib 的动态数组里（见 lib/BookListLib），
+// 这里不再用固定数组。显示时靠 BookList::snapshot() 拷一份快照出来画。
 
 class DisplayLib {
 public:
@@ -65,9 +62,19 @@ public:
     void setFrame(const HuskyFrame &frame);
     void setSystemInfo(const SystemInfo &info);
     void setWave(const WaveState &wave);      // 超声波测距快照
-    void countBook(const HuskyWord &word);   // 累计一本识别到的书
+    // 累计一本识别到的书（按 ID/文字去重，进动态数组书单）。别的任务可调。
+    void countBook(const HuskyWord &word);
+
+    // ---- 书单（动态数组）----
+    // 直接加一条（串口测试用，不去重），返回下标
+    int16_t addBook(const char *text, int16_t id = 0);
+    // 取出第 index 条（书列表页的"取出"按钮调它）：删掉并从列表移除
+    int16_t removeBook(int16_t index);
+    // 清空书单
     void clearBooks();
-    int16_t bookCount() const;
+    int16_t bookCount();
+    // 串口打印整张书单
+    void printBooks();
 
     // 弹一条消息（覆盖整屏），ms 毫秒后自动回到正常页面。中文直接写，UTF-8。
     void showMessage(const char *text, uint32_t ms = 3000);
@@ -130,6 +137,11 @@ private:
     void createTouchUi();
     void showTouchPage();
 
+    // 书列表页：建滚动容器 + 按快照重建每一行（行里带"取出"按钮）
+    void createBookUi();
+    void showBooksPage();
+    void rebuildBookRows();
+
 #if CFG_DISPLAY_BRINGUP == 2
     // 排错模式 2 的纯色块页面（一个字体都不碰）
     void createColorTestUi();
@@ -139,7 +151,6 @@ private:
     void showStatusPage(const HuskyFrame &f, int16_t bookNum);
     void showSysInfoPage(const SystemInfo &info);
     void showWavePage(const WaveState &wave);
-    void showBooksPage(const BookRecord *books, int16_t bookNum);
     void showMessagePage(const char *text);
 
     TFT_eSPI _tft;
@@ -149,8 +160,15 @@ private:
     HuskyFrame _frame;
     SystemInfo _info;
     WaveState _wave;
-    BookRecord _books[MAX_BOOK_RECORDS];
-    int16_t _bookNum;
+
+    // ---- 书单：动态数组（BookList）+ 给显示用的快照 ----
+    // 动态数组在别的任务里增删，所以画屏前先 snapshot() 到下面这块常驻内存里，
+    // 画的过程中不占 BookList 的锁（CFG_BOOKLIST_SNAP_MAX x 约 44 字节）。
+    BookList _books;
+    BookItem _bookSnap[CFG_BOOKLIST_SNAP_MAX];
+    int16_t _bookSnapNum;
+    uint32_t _bookSnapVersion;      // 上次重建行控件时的列表版本
+    volatile bool _booksDirty;      // 列表变了 -> 下次刷新要重建行控件
 
     uint8_t _page;
     bool _dirty;

@@ -94,8 +94,11 @@ DisplayLib display;
 display.begin();                    // 初始化屏 + LVGL + 建界面 + displayTask(核心0)
 display.setFrame(frame);            // 写识别结果（内部加锁，不画屏）
 display.setSystemInfo(info);        // 写系统信息
-display.countBook(frame.words[0]);  // 累计一本书（按 ID/文字去重）
+display.countBook(frame.words[0]);  // 累计一本书（进动态数组书单，按 ID/文字去重）
 display.bookCount(); display.clearBooks();
+display.addBook("测试书 1");         // 直接加一条（串口测试用，不去重）
+display.removeBook(0);              // 取出第 1 条（书列表页的“取出”按钮走这里）
+display.printBooks();               // 串口打印整张书单
 display.showMessage("开机自检完成", 2000);  // 整屏消息，2 秒后自动回正常页（中文直接写）
 display.setPage(PAGE_STATUS); display.nextPage();
 ```
@@ -207,7 +210,7 @@ waveTask    --WaveState(waveMutex 保护)-->  DisplayLib.setWave() + 串口
 | `w` / `w,1` | 保存知识库（默认槽位 0，可给 0~3） |
 | `o` / `o,1` | 读取知识库 |
 | `p` | 读算法参数（排查 OCR 读出空内容） |
-| `b` | 跳到书列表页并打印数量 |
+| `b` / `b,a` / `b,p` | 书列表页：`b` 跳到书列表页，`b,a[,N]` 加 N 条测试书（没二哈也能试），`b,p` 打印整张书单 |
 | `c` | 清空书列表记录 |
 | `m` / `m,1,300` | 步进电机：`m` 看用法，`m,?` 看状态，`m,1,300` 电机1走300步，`m,s1500` 改速度 |
 | `z` / `z,2` | 步进急停：`z` 全停，`z,2` 只停电机2 |
@@ -579,4 +582,84 @@ XPT2046 除了 X/Y 坐标，还能读出一个压力值 **Z**（Z1/Z2 差分，�
 | 坐标抖 | 加大 `CFG_TOUCH_SAMPLES`（默认 3） |
 
 默认值 `SWAP_XY=0 / INVERT_X=1 / INVERT_Y=0` 是从参考工程照抄的、已在那块屏上验证过的一组。
+
+### 10.6 底部触摸屏蔽与滑动限制
+
+| 宏 | 默认 | 作用 |
+| --- | --- | --- |
+| `CFG_TOUCH_BOTTOM_MASK_PX` | 20 | 屏幕最下方这么多像素**不响应触摸**（防止手指划到边缘误触）；0 = 不屏蔽 |
+| `CFG_TOUCH_SCROLL_LIMIT` | 0 | LVGL 的“手指要先移动多少像素才算滑动”。0 = 解除限制，一动就滑 |
+
+> ⚠️ `CFG_TOUCH_BOTTOM_MASK_PX` 会把 `y >= SCR_H - 20 = 300` 的触摸判成“没按”。
+> 书列表页的滚动容器高度已经主动避开这一段（见 `createBookUi()`），所以按钮不会被挡住。
+> `CFG_TOUCH_SCROLL_LIMIT = 0` 手感最跟手，但按钮容错变小；如果发现点按钮常常变成滚动，
+> 把它设成 10 ~ 20。
+
+---
+
+## 11. 书单（动态数组）与书列表页
+
+### 11.1 动态数组在哪儿
+
+`lib/BookListLib`（`BookList.h/.cpp`）——**不用 STL**，就是 `malloc` + `realloc` 翻倍：
+
+```cpp
+struct BookItem { int16_t id; uint16_t count; char text[HUSKY_TEXT_LEN]; };
+
+BookList books;
+books.begin();                       // 建锁 + 申请 CFG_BOOKLIST_INIT_CAP 条
+books.addOrCount(id, text);          // 有同 ID/同名就计数 +1，否则追加（不够就扩容）
+books.removeAt(i);                   // 删第 i 条，后面的往前挪
+books.snapshot(buf, maxNum);         // 加锁拷快照给显示任务，画屏时不占锁
+books.version();                     // 每次增删清空 +1，显示库靠它决定要不要重建行控件
+```
+
+| 宏 | 默认 | 作用 |
+| --- | --- | --- |
+| `CFG_BOOKLIST_INIT_CAP` | 4 | 初始容量，装不下自动翻倍 |
+| `CFG_BOOKLIST_MAX` | 64 | 容量上限（防乱码把堆吃光）；0 = 不限 |
+| `CFG_BOOKLIST_SNAP_MAX` | 24 | 书列表页一次最多显示几行 |
+| `CFG_BOOK_ROW_H` | 34 | 每行高度(px) |
+
+线程安全：识别任务 `addOrCount()`、显示任务 `snapshot()`/`removeAt()`，
+每条接口内部都拿 `_mutex`；显示任务拷完快照立刻放锁，再慢慢画。
+
+### 11.2 书列表页（第 3 页）
+
+```
+┌──────────────────────────────────────┐
+│ 共 8 本（上下滑动看全部，点“取出”移出）│  ← 标题行（跟着列表一起滚）
+├──────────────────────────────────────┤
+│ 1. 测试书 1                    x1 [取出] │
+│ 2. 测试书 2                    x1 [取出] │
+│ …                                      │  ← 竖排、可上下滑动（带惯性）
+└──────────────────────────────────────┘
+```
+
+- 每行左边是“序号. 书名 x次数”，右边是**取出**按钮（红色）。
+- 点“取出” → `DisplayLib::removeBook(i)` → 从动态数组里删掉 + 串口打日志 + 重建列表。
+- 行控件自己**禁止滚动**（`lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE)`），
+  这样手指拖动才会交给父容器滚动 —— 这点不设的话列表压不动。
+- ⚠️ 事件回调里**只改数据、不删控件**：删掉正在处理事件的按钮会崩。
+  行控件统一交给 `update()` 里的 `rebuildBookRows()` 重建。
+
+### 11.3 机械接上以后往哪写
+
+`DisplayLib::removeBook()` 里留了入口：
+
+```cpp
+// TODO(机械接上以后): 这里就是"取书流程"的入口——
+//   把这条的书号/位置交给 stepperTask（M1 推出小车 / M2 中间夹层 / M3 升降平台）。
+```
+
+### 11.4 没有二哈也能测
+
+二哈不在线时用串口造数据：
+
+```
+b,a,8     加 8 条测试书（够多，能试滑动）
+b         跳到书列表页
+b,p       串口打印整张书单
+c         清空书单
+```
 

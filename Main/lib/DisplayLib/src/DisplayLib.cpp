@@ -28,7 +28,7 @@ static lv_color_t *s_buf1 = nullptr;
 static lv_color_t *s_buf2 = nullptr;
 
 //------------------------------------ 排错统计（只给串口命令 d 看） ------------------------------------//
-// 刷屏回调被调了几次、最近一次花了多少微秒。
+// 刷屏回调被调了几次，最近一次花了多少微秒。
 // 这两个数是排错的关键证据：
 //   一直是 0        -> LVGL 根本没在刷屏（tick / 缓冲 / 驱动注册的问题）
 //   在涨但屏是黑的  -> 数据已经发出去了，屏自己没反应（背光 / 接线 / 屏型号）
@@ -65,12 +65,15 @@ static lv_obj_t *s_btnReset = nullptr;     // 清零
 static lv_obj_t *s_btnNext = nullptr;      // 下一页
 static lv_indev_drv_t s_indevDrv;
 
+//------------------------------------ 书列表页（动态数组书单的界面） ------------------------------------//
+static lv_obj_t *s_bookPanel = nullptr;    // 可滚动的书单容器（每行带"取出"按钮）
+
 static bool s_touchPressed = false;        // 当前是否有手指按着
 static uint16_t s_touchX = 0;              // 换算后的屏幕坐标
 static uint16_t s_touchY = 0;
 static uint16_t s_touchRawX = 0;           // XPT2046 原始值（校准/排错看它）
 static uint16_t s_touchRawY = 0;
-static uint16_t s_touchZ = 0;              // 压力值（灵敏度阈值就是比它）
+static uint16_t s_touchZ = 0;              // 压力值（灵敏度门限就是比它）
 static uint32_t s_touchPressCount = 0;     // 累计按下次数（原始触摸）
 static uint32_t s_btnClickCount = 0;       // 测试按钮被点了几次
 
@@ -146,7 +149,7 @@ static void *displayAlloc(size_t size) {
 //      不闪 -> 用万用表量 GPIO47 对 GND：约 3.3V 说明引脚在输出，
 //      那就是 LED 线/模块供电/LED 本身的问题，0V 才是主控这边的问题。
 //   2) 敲 d,5 把电平对调试试（有些模块是低有效）。
-//   3) 确认模块 LED/BL 脚确实接在 GPIO47、且模块 GND 与主控共地。
+//   3) 确认模块 LED/BL 脚确实接在 GPIO47，且模块 GND 与主控共地。
 // =============================================================================
 static void backlightWrite(bool on) {
 #if CFG_TFT_BL_USE_LEDC
@@ -182,7 +185,7 @@ static void lvglLogCb(const char *buf) {
 // LVGL 刷屏回调：把 LVGL 画好的区域推给 TFT_eSPI
 //
 // 加总线锁的原因：现在只有 displayTask 会刷屏，这把锁是“零成本保险”，
-// 以后要加摄像头预览、或别的任务直接写屏（比如串口命令 d,1 的彩条），
+// 以后要加摄像头预览，或别的任务直接写屏（比如串口命令 d,1 的彩条），
 // 两个写者同时动 SPI 就会花屏，所以从第一天就把锁留在这里。
 // =============================================================================
 static void displayFlushCb(lv_disp_drv_t *drv, const lv_area_t *area,
@@ -215,9 +218,9 @@ static void displayFlushCb(lv_disp_drv_t *drv, const lv_area_t *area,
 // =============================================================================
 // 触摸（XPT2046）：LVGL 输入设备
 //
-// LVGL 需要有人告诉它“现在有没有按下、按在哪”，下面这个回调就是干这个的。
+// LVGL 需要有人告诉它“现在有没有按下，按在哪”，下面这个回调就是干这个的。
 // 它由 lv_timer_handler() 按 LV_INDEV_DEF_READ_PERIOD（= CFG_TOUCH_READ_MS）调起，
-// 和刷屏、按钮事件都跑在 displayTask 里，所以天然不会并发。
+// 和刷屏，按钮事件都跑在 displayTask 里，所以天然不会并发。
 //
 // 原始值 -> 屏幕坐标的换算照抄参考工程 LVGLin240320TFTLCD：
 //   先按 SWAP/INVERT 调轴方向，再按 4095 满量程线性映射到 SCR_W/SCR_H。
@@ -258,13 +261,24 @@ static void touchReadCb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
         s_touchRawY = rawY;
         s_touchZ = s_touch.lastPressure();
 
+        int16_t sx = 0;
+        int16_t sy = 0;
+        touchToScreen(rawX, rawY, &sx, &sy);
+
+        // ---- 屏幕最下方 CFG_TOUCH_BOTTOM_MASK_PX 像素不响应触摸 ----
+        // 手指划到这个区域容易误触（也容易被外壳/手势区蹭到），直接当成"没按"。
+        if (CFG_TOUCH_BOTTOM_MASK_PX > 0 && sy >= (SCR_H - CFG_TOUCH_BOTTOM_MASK_PX)) {
+            s_touchPressed = false;
+            data->state = LV_INDEV_STATE_RELEASED;
+            data->point.x = lastX;
+            data->point.y = lastY;
+            return;
+        }
+
         if (!s_touchPressed) {
             s_touchPressCount++;  // 只统计“按下”这一瞬间，不按读取次数计
         }
 
-        int16_t sx = 0;
-        int16_t sy = 0;
-        touchToScreen(rawX, rawY, &sx, &sy);
         s_touchX = (uint16_t)sx;
         s_touchY = (uint16_t)sy;
         lastX = sx;
@@ -335,6 +349,18 @@ static void onBtnNextPage(lv_event_t *e) {
         Serial.printf("触摸: 下一页 -> 第 %u 页\n", (unsigned)s_self->page() + 1);
     }
 }
+
+// 书列表页每一行右边的"取出"按钮
+// 只把"第几条"取出来交给 DisplayLib::removeBook()：
+//   · 它只在 BookList 里删数据（加锁，很快），不碰任何控件，
+//   · 行控件的重建交给 update() 里的 rebuildBookRows()，
+//     绝不能在这里删自己（LVGL 不允许在事件回调里删掉正在处理的控件）。
+static void onBtnTakeOut(lv_event_t *e) {
+    int16_t index = (int16_t)(intptr_t)lv_event_get_user_data(e);
+    if (s_self != nullptr) {
+        s_self->removeBook(index);
+    }
+}
 #endif  // CFG_RUN_TOUCH
 
 // =============================================================================
@@ -344,8 +370,10 @@ DisplayLib::DisplayLib() {
     memset(&_frame, 0, sizeof(_frame));
     memset(&_info, 0, sizeof(_info));
     memset(&_wave, 0, sizeof(_wave));
-    memset(_books, 0, sizeof(_books));
-    _bookNum = 0;
+    memset(_bookSnap, 0, sizeof(_bookSnap));
+    _bookSnapNum = 0;
+    _bookSnapVersion = 0;
+    _booksDirty = true;
 
     _mutex = nullptr;
     _taskHandle = nullptr;
@@ -380,6 +408,14 @@ bool DisplayLib::begin() {
     if (_mutex == nullptr || s_busMutex == nullptr) {
         Serial.println("显示库: 互斥锁创建失败");
         return false;
+    }
+
+    // 书单：动态数组，先申请 CFG_BOOKLIST_INIT_CAP 条，不够会自动扩容
+    if (!_books.begin()) {
+        Serial.println("显示库: 书单初始化失败（内存不够?）");
+    } else {
+        Serial.printf("显示库: 书单就绪（动态数组, 初始 %d 条, 上限 %d 条）\n",
+                      _books.capacity(), CFG_BOOKLIST_MAX);
     }
 
     // ---- 1) 屏幕 ----
@@ -444,7 +480,7 @@ bool DisplayLib::begin() {
 #endif
 
     // LVGL 的“时钟”就是刷屏的心跳：它不走，lv_timer_handler() 永远不会去刷屏，
-    // 表现就是“串口一切正常、屏上什么都没有”。这里开机就量一次，直接排除这个坑。
+    // 表现就是“串口一切正常，屏上什么都没有”。这里开机就量一次，直接排除这个坑。
     {
         uint32_t tick0 = lv_tick_get();
         delay(20);
@@ -488,7 +524,7 @@ bool DisplayLib::begin() {
     lv_indev_drv_init(&s_indevDrv);
     s_indevDrv.type = LV_INDEV_TYPE_POINTER;
     s_indevDrv.read_cb = touchReadCb;
-    s_indevDrv.scroll_limit = 40;   // 和参考工程一致：手指拖动超过 40px 才算滚动
+    s_indevDrv.scroll_limit = CFG_TOUCH_SCROLL_LIMIT;  // 0 = 解除滑动限制（config.h）
     lv_indev_t *indev = lv_indev_drv_register(&s_indevDrv);
     s_touch.printConfig();
     if (indev == nullptr) {
@@ -673,6 +709,9 @@ void DisplayLib::createUi() {
 
     // 触摸测试页的按钮面板（默认隐藏，翻到触摸页才显示）
     createTouchUi();
+
+    // 书列表页的滚动容器（默认隐藏，翻到书列表页才显示）
+    createBookUi();
 }
 
 // =============================================================================
@@ -727,7 +766,7 @@ void DisplayLib::createTouchUi() {
 #endif
 
     // 底下一排三个小按钮：上一页 / 清零 / 下一页
-    // 上一页、下一页走的就是串口命令 n / t 用的那两个翻页函数，点一下就能验证触摸是否生效
+    // 上一页，下一页走的就是串口命令 n / t 用的那两个翻页函数，点一下就能验证触摸是否生效
     s_btnPrev = makeTouchButton(s_touchPanel, "上一页", -70, 0x0088FF);
     s_btnReset = makeTouchButton(s_touchPanel, "清零", 0, 0x607080);
     s_btnNext = makeTouchButton(s_touchPanel, "下一页", 70, 0x0088FF);
@@ -776,68 +815,67 @@ void DisplayLib::setWave(const WaveState &wave) {
     }
 }
 
-// 累计一本：先按 ID 找（ID 非 0 时），再按文字内容找，都没有就新增一条
+// 累计一本：去重/计数的逻辑在 BookListLib 里（动态数组），这里只管转交 + 置脏标志
 void DisplayLib::countBook(const HuskyWord &word) {
-    if (_mutex == nullptr) {
-        return;
-    }
-    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-        return;
-    }
-
     const char *text = word.content;
     if (text[0] == '\0') {
         text = word.name;
     }
+    if (_books.addOrCount(word.id, text) >= 0) {
+        _booksDirty = true;   // 列表变了，书列表页的行控件要重建
+        _dirty = true;
+    }
+}
 
-    int16_t found = -1;
-    for (int16_t i = 0; i < _bookNum; i++) {
-        if (word.id != 0 && _books[i].id == word.id) {
-            found = i;
-            break;
-        }
-        if (text[0] != '\0' && strcmp(_books[i].text, text) == 0) {
-            found = i;
-            break;
-        }
+// 直接加一条（串口测试用，不去重）：没有二哈也能把书列表页/取出按钮/滚动试出来
+int16_t DisplayLib::addBook(const char *text, int16_t id) {
+    int16_t index = _books.add(text, id);
+    if (index >= 0) {
+        _booksDirty = true;
+        _dirty = true;
+    }
+    return index;
+}
+
+// 取出第 index 条：书列表页每行右边的"取出"按钮最终走到这里
+// ⚠️ 这个函数是在 LVGL 的事件回调里被调的，所以**只能改数据，不能删控件**
+//    （删掉正在处理事件的按钮会崩）。行控件的重建交给 update() 里的 rebuildBookRows()。
+int16_t DisplayLib::removeBook(int16_t index) {
+    // 先把要取出的那条读出来：日志要打名字，以后接机械也要拿它定位
+    BookItem item;
+    memset(&item, 0, sizeof(item));
+    if (!_books.at(index, &item)) {
+        Serial.printf("书单: 取出失败, 下标 %d 不合法\n", (int)index);
+        return -1;
     }
 
-    if (found < 0 && _bookNum < MAX_BOOK_RECORDS) {
-        found = _bookNum;
-        _books[found].id = word.id;
-        _books[found].count = 0;
-        snprintf(_books[found].text, sizeof(_books[found].text), "%s", text);
-        _bookNum++;
+    int16_t left = _books.removeAt(index);
+    if (left < 0) {
+        return -1;
     }
 
-    if (found >= 0 && _books[found].count < 0xFFFF) {
-        _books[found].count++;
-    }
-
+    Serial.printf("书单: 已取出第 %d 条 '%s', 剩 %d 条\n", (int)(index + 1),
+                  item.text, (int)left);
+    // TODO(机械接上以后): 这里就是"取书流程"的入口——
+    //   把这条的书号/位置交给 stepperTask（M1 推出小车 / M2 中间夹层 / M3 升降平台）。
+    _booksDirty = true;
     _dirty = true;
-    xSemaphoreGive(_mutex);
+    return left;
 }
 
 void DisplayLib::clearBooks() {
-    if (_mutex == nullptr) {
-        return;
-    }
-    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        memset(_books, 0, sizeof(_books));
-        _bookNum = 0;
-        _dirty = true;
-        xSemaphoreGive(_mutex);
-    }
+    _books.clear();
+    _booksDirty = true;
+    _dirty = true;
+    Serial.println("书单: 已清空");
 }
 
-int16_t DisplayLib::bookCount() const {
-    int16_t n = 0;
-    if (_mutex != nullptr &&
-        xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-        n = _bookNum;
-        xSemaphoreGive(_mutex);
-    }
-    return n;
+int16_t DisplayLib::bookCount() {
+    return _books.count();
+}
+
+void DisplayLib::printBooks() {
+    _books.print();
 }
 
 void DisplayLib::showMessage(const char *text, uint32_t ms) {
@@ -909,6 +947,7 @@ void DisplayLib::printHelp() {
     Serial.println("  2 = 已识别书列表页");
     Serial.println("  3 = 超声波测距页(距离/滤波/统计/测厚)");
     Serial.println("  4 = 触摸测试页(按钮计数 + 坐标/原始值)，命令 t 直接跳过去");
+    Serial.println("  2 = 书列表页(动态数组书单, 每行带“取出”按钮, 可上下滑动)");
 }
 
 const char *displayLibVersion() {
@@ -1050,7 +1089,7 @@ uint32_t DisplayLib::busWriteTest(bool fullScreen) {
 }
 
 // =============================================================================
-// 背光排错：直接开关 / 闪烁（串口命令 d,4、d,5 用）
+// 背光排错：直接开关 / 闪烁（串口命令 d,4，d,5 用）
 // =============================================================================
 void DisplayLib::backlightSet(bool on) {
     backlightWrite(on);
@@ -1125,8 +1164,11 @@ void DisplayLib::printDiag() {
                   s_touchPressed ? "按下" : "松开", (unsigned)s_touchX,
                   (unsigned)s_touchY, (unsigned)s_touchRawX,
                   (unsigned)s_touchRawY, (unsigned)s_touchZ);
-    Serial.printf("        压力阈值(灵敏度) %d：调大=要按更重，调小=更灵敏，0=不判\n",
+    Serial.printf("        压力门限(灵敏度) %d：调大=要按更重，调小=更灵敏，0=不判\n",
                   CFG_TOUCH_PRESSURE_MIN);
+    Serial.printf("        底部屏蔽 %d px（y >= %d 不响应）, 滑动限制 %d\n",
+                  CFG_TOUCH_BOTTOM_MASK_PX, SCR_H - CFG_TOUCH_BOTTOM_MASK_PX,
+                  CFG_TOUCH_SCROLL_LIMIT);
     Serial.printf("        按下 %lu 次, 测试按钮 %lu 次 | SWAP=%d INVERT_X=%d INVERT_Y=%d\n",
                   (unsigned long)s_touchPressCount, (unsigned long)s_btnClickCount,
                   CFG_TOUCH_SWAP_XY, CFG_TOUCH_INVERT_X, CFG_TOUCH_INVERT_Y);
@@ -1144,9 +1186,8 @@ void DisplayLib::printDiag() {
 // 内容签名：只取页面上真的会显示的值，内容没变就不动控件
 // =============================================================================
 static uint32_t computeSignature(const HuskyFrame &f, const SystemInfo &info,
-                                 const WaveState &wave,
-                                 const BookRecord *books, int16_t bookNum,
-                                 uint8_t page) {
+                                 const WaveState &wave, int16_t bookNum,
+                                 uint32_t bookVersion, uint8_t page) {
     uint32_t sig = 2166136261UL;
 
     sig = (sig ^ (uint32_t)(f.online ? 1 : 0)) * 16777619UL;
@@ -1188,11 +1229,9 @@ static uint32_t computeSignature(const HuskyFrame &f, const SystemInfo &info,
     sig = (sig ^ info.flashUsedKb) * 16777619UL;
     sig = (sig ^ (info.uptimeSeconds / 10U)) * 16777619UL;
 
+    // 书单：条数 + 版本号进签名（版本一变，书列表页的行控件就要重建）
     sig = (sig ^ (uint32_t)(bookNum & 0xFF)) * 16777619UL;
-    for (int16_t i = 0; i < bookNum && i < 4; i++) {
-        sig = (sig ^ (uint32_t)books[i].id) * 16777619UL;
-        sig = (sig ^ (uint32_t)books[i].count) * 16777619UL;
-    }
+    sig = (sig ^ bookVersion) * 16777619UL;
 
     sig = (sig ^ (uint32_t)(page & 0xFF)) * 16777619UL;
     return sig;
@@ -1216,8 +1255,6 @@ void DisplayLib::update() {
     HuskyFrame frame;
     SystemInfo info;
     WaveState wave;
-    BookRecord books[MAX_BOOK_RECORDS];
-    int16_t bookNum = 0;
     uint8_t page = PAGE_STATUS;
     bool messageActive = false;
     char message[sizeof(_message)];
@@ -1226,7 +1263,6 @@ void DisplayLib::update() {
     memset(&frame, 0, sizeof(frame));
     memset(&info, 0, sizeof(info));
     memset(&wave, 0, sizeof(wave));
-    memset(books, 0, sizeof(books));
     memset(message, 0, sizeof(message));
 
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -1235,13 +1271,16 @@ void DisplayLib::update() {
     frame = _frame;
     info = _info;
     wave = _wave;
-    memcpy(books, _books, sizeof(books));
-    bookNum = _bookNum;
     page = _page;
     messageActive = _messageActive;
     snprintf(message, sizeof(message), "%s", _message);
     messageUntil = _messageUntil;
     xSemaphoreGive(_mutex);
+
+    // 书单是动态数组，在别的任务里增删：拷一份快照出来画，画的过程不占它的锁
+    _bookSnapNum = _books.snapshot(_bookSnap, CFG_BOOKLIST_SNAP_MAX);
+    uint32_t bookVersion = _books.version();
+    int16_t bookTotal = _books.count();   // 真实条数（可能比快照多，快照受 SNAP_MAX 限制）
 
     // ---- 2) 消息到期就撤掉 ----
     if (messageActive && (int32_t)(millis() - messageUntil) >= 0) {
@@ -1267,7 +1306,8 @@ void DisplayLib::update() {
     }
 
     // ---- 4) 正常页：内容变了才更新控件 ----
-    uint32_t sig = computeSignature(frame, info, wave, books, bookNum, page);
+    uint32_t sig =
+        computeSignature(frame, info, wave, bookTotal, bookVersion, page);
     if (_sigValid && !_dirty && sig == _lastSig) {
         return;
     }
@@ -1285,6 +1325,10 @@ void DisplayLib::update() {
     // （用 objSetHidden：状态没变就不动它，避免每轮刷新都让面板区域白重画一次）
     objSetHidden(s_touchPanel, page != PAGE_TOUCH);
 
+    // 书列表页：显示可滚动的书单面板，隐藏通用正文标签（面板要占满整屏高度）
+    objSetHidden(s_bookPanel, page != PAGE_BOOKS);
+    objSetHidden(s_labelBody, page == PAGE_BOOKS);
+
     switch (page) {
         case PAGE_SYSINFO:
             showSysInfoPage(info);
@@ -1293,14 +1337,14 @@ void DisplayLib::update() {
             showWavePage(wave);
             break;
         case PAGE_BOOKS:
-            showBooksPage(books, bookNum);
+            showBooksPage();
             break;
         case PAGE_TOUCH:
             showTouchPage();
             break;
         case PAGE_STATUS:
         default:
-            showStatusPage(frame, bookNum);
+            showStatusPage(frame, bookTotal);
             break;
     }
 }
@@ -1377,34 +1421,118 @@ void DisplayLib::showSysInfoPage(const SystemInfo &info) {
     objSetHidden(s_barValue, false);
 }
 
-void DisplayLib::showBooksPage(const BookRecord *books, int16_t bookNum) {
-    char body[CFG_STATUS_TEXT_LEN];
-    int off = 0;
-    int16_t shown = bookNum;
+// =============================================================================
+// 书列表页：一个可上下滚动的容器，里面每一行 = "序号. 书名 xN" + 一个"取出"按钮
+//
+// 数据来自 _bookSnap（update() 里从动态数组书单拷出来的快照），
+// 这里只负责按快照把控件摆出来，增删都发生在 BookList 里。
+// =============================================================================
+void DisplayLib::createBookUi() {
+    // 容器高度主动避开屏幕最下方 CFG_TOUCH_BOTTOM_MASK_PX 像素（那段不响应触摸），
+    // 这样"取出"按钮永远不会被屏蔽区挡住。
+    s_bookPanel = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(s_bookPanel, SCR_W - 8,
+                    SCR_H - TITLE_H - CFG_TOUCH_BOTTOM_MASK_PX - 8);
+    lv_obj_align(s_bookPanel, LV_ALIGN_TOP_MID, 0, TITLE_H + 4);
+    lv_obj_set_style_radius(s_bookPanel, 6, 0);
+    lv_obj_set_style_border_width(s_bookPanel, 0, 0);
+    lv_obj_set_style_pad_all(s_bookPanel, 4, 0);
+    lv_obj_set_style_pad_row(s_bookPanel, 4, 0);
+    lv_obj_set_style_bg_color(s_bookPanel, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_bg_opa(s_bookPanel, LV_OPA_COVER, 0);
 
-    if (shown > MAX_BOOK_RECORDS) {
-        shown = MAX_BOOK_RECORDS;
+    // 竖着排，能上下滚：行控件本身禁止滚动，手指拖动才会交给容器（这点很重要）
+    lv_obj_set_flex_flow(s_bookPanel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_scroll_dir(s_bookPanel, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_bookPanel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(s_bookPanel, LV_OBJ_FLAG_SCROLL_MOMENTUM);  // 松手带惯性
+
+    lv_obj_add_flag(s_bookPanel, LV_OBJ_FLAG_HIDDEN);  // 默认隐藏，翻到第 3 页才显示
+}
+
+// 按快照重建所有行（只在列表版本变了，或刚翻到这一页时做）
+// ⚠️ 只能在 update() 里调：这里会删掉旧的行控件，不能在按钮自己的事件回调里删它自己
+void DisplayLib::rebuildBookRows() {
+    if (s_bookPanel == nullptr) {
+        return;
     }
 
-    off += snprintf(body + off, sizeof(body) - (size_t)off, "已记录 %d 本：\n",
-                    (int)bookNum);
+    lv_obj_clean(s_bookPanel);  // 先全删（连同旧按钮），再按快照重建
 
-    if (shown == 0) {
-        off += snprintf(body + off, sizeof(body) - (size_t)off,
-                        "\n（还没扫到书）");
+    // 第一行是标题栏：条数 + 提示
+    lv_obj_t *header = lv_label_create(s_bookPanel);
+    lv_obj_set_style_text_font(header, DISPLAY_FONT_CJK, 0);
+    lv_obj_set_style_text_color(header, lv_color_hex(0x303840), 0);
+    int16_t total = _books.count();   // 真实条数：快照最多 CFG_BOOKLIST_SNAP_MAX 条
+    if (total == 0) {
+        lv_label_set_text(header, "书单是空的（扫到书会自动进来）");
+    } else if (total > _bookSnapNum) {
+        lv_label_set_text_fmt(header, "共 %d 本（屏上只显示前 %d 本）", (int)total,
+                              (int)_bookSnapNum);
+    } else {
+        lv_label_set_text_fmt(header, "共 %d 本（上下滑动看全部，点“取出”移出）",
+                              (int)total);
     }
 
-    for (int16_t i = 0; i < shown; i++) {
-        if (off > (int)sizeof(body) - 48) {
-            break;  // 屏幕放不下就截断，不越界
-        }
-        const char *t = (books[i].text[0] != '\0') ? books[i].text : "（无文字）";
-        off += snprintf(body + off, sizeof(body) - (size_t)off, "%d. %s x%u\n",
-                        (int)(i + 1), t, (unsigned)books[i].count);
+    for (int16_t i = 0; i < _bookSnapNum; i++) {
+        // ---- 一行 ----
+        lv_obj_t *row = lv_obj_create(s_bookPanel);
+        lv_obj_set_size(row, LV_PCT(100), CFG_BOOK_ROW_H);
+        lv_obj_set_style_radius(row, 4, 0);
+        lv_obj_set_style_border_width(row, 0, 0);
+        lv_obj_set_style_pad_all(row, 3, 0);
+        lv_obj_set_style_pad_column(row, 4, 0);
+        lv_obj_set_style_bg_color(row, lv_color_hex(0xEEF3F8), 0);
+        lv_obj_set_style_bg_opa(row, LV_OPA_COVER, 0);
+        lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);  // 手指拖动交给父容器滚动
+        lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+        lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN,
+                              LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+
+        // ---- 左边：序号 + 书名 + 次数 ----
+        lv_obj_t *label = lv_label_create(row);
+        lv_obj_set_style_text_font(label, DISPLAY_FONT_CJK, 0);
+        lv_obj_set_style_text_color(label, lv_color_hex(COLOR_TEXT), 0);
+        lv_obj_set_width(label, SCR_W - 8 - 4 - 62 - 10);   // 给"取出"按钮留位置
+        lv_label_set_long_mode(label, LV_LABEL_LONG_DOT);   // 太长结尾显示 ...
+        const char *t = (_bookSnap[i].text[0] != '\0') ? _bookSnap[i].text
+                                                      : "（无文字）";
+        lv_label_set_text_fmt(label, "%d. %s x%u", (int)(i + 1), t,
+                              (unsigned)_bookSnap[i].count);
+
+        // ---- 右边：取出按钮（点一下把这条移出书单）----
+        lv_obj_t *btn = lv_btn_create(row);
+        lv_obj_set_size(btn, 58, CFG_BOOK_ROW_H - 8);
+        lv_obj_set_style_radius(btn, 4, 0);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0xE05050), 0);
+
+        lv_obj_t *btnLabel = lv_label_create(btn);
+        lv_obj_set_style_text_font(btnLabel, DISPLAY_FONT_CJK, 0);
+        lv_obj_set_style_text_color(btnLabel, lv_color_white(), 0);
+        lv_label_set_text(btnLabel, "取出");
+        lv_obj_center(btnLabel);
+
+#if CFG_RUN_TOUCH
+        // 回调只带"第几条"，不带 BookItem 指针：列表每次变化都会重建控件，
+        // 所以下标在两次点击之间不会失效（越界还有 removeAt 兜着）。
+        lv_obj_add_event_cb(btn, onBtnTakeOut, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+#endif
     }
 
-    lv_label_set_text(s_labelBody, body);
+    _bookSnapVersion = _books.version();
+    _booksDirty = false;
+}
+
+// 书列表页刷新：列表版本变了（增/删/清空）才重建行控件
+void DisplayLib::showBooksPage() {
     objSetHidden(s_barValue, true);
+
+    if (s_bookPanel == nullptr) {
+        return;
+    }
+    if (_booksDirty || _bookSnapVersion != _books.version()) {
+        rebuildBookRows();
+    }
 }
 
 // 超声波测距页：距离(mm/cm) + 滤波值 + 统计 + 测厚信息
@@ -1493,7 +1621,7 @@ void DisplayLib::showTouchPage() {
         snprintf(body, sizeof(body),
                  "触摸: 松开\n屏幕: %u, %u   原始: %u, %u\n"
                  "按下 %lu 次   按钮点击 %lu 次\n"
-                 "压力阈值 %d（d,6 看实时 Z）",
+                 "压力门限 %d（d,6 看实时 Z）",
                  (unsigned)s_touchX, (unsigned)s_touchY,
                  (unsigned)s_touchRawX, (unsigned)s_touchRawY,
                  (unsigned long)s_touchPressCount,
@@ -1508,7 +1636,7 @@ void DisplayLib::showTouchPage() {
 // =============================================================================
 // 触摸原始值采样（串口命令 d,3）
 // 第一次调用开始记极值，第二次调用打印结果 + 轴方向建议。
-// 用途：确认四角都能读到、轴方向对不对，不用反复改代码烧录试。
+// 用途：确认四角都能读到，轴方向对不对，不用反复改代码烧录试。
 // =============================================================================
 void DisplayLib::requestTouchSample() {
     _testRequest = 3;
@@ -1526,7 +1654,7 @@ void DisplayLib::runTouchDump() {
     int irq = s_touch.irqLevel();
     Serial.printf("--- 触摸原始值 4 次采样 (T_IRQ=%s) ---\n",
                   (irq < 0) ? "未接" : (irq == 0 ? "LOW(有触摸)" : "HIGH(空闲)"));
-    Serial.println("  按住屏幕不放、连着敲几次 d,6：T_IRQ 应该变 LOW，Z 应该变大");
+    Serial.println("  按住屏幕不放，连着敲几次 d,6：T_IRQ 应该变 LOW，Z 应该变大");
     Serial.printf("  判断“算不算按下”的两个条件：坐标 %d~%d，压力 Z >= %d\n",
                   CFG_TOUCH_RAW_MIN, CFG_TOUCH_RAW_MAX, CFG_TOUCH_PRESSURE_MIN);
     for (int i = 0; i < 4; i++) {
@@ -1542,7 +1670,7 @@ void DisplayLib::runTouchDump() {
         vTaskDelay(pdMS_TO_TICKS(120));
     }
     Serial.println("  调灵敏度：把 CFG_TOUCH_PRESSURE_MIN 设成“轻碰的最大 Z”和“正常按的 Z”之间");
-    Serial.println("    嫌灵敏 -> 调大；嫌迟钝 -> 调小；设 0 = 不判压力");
+    Serial.println("    嫌灵敏 -> 调大，嫌迟钝 -> 调小，设 0 = 不判压力");
     Serial.printf("  有效窗口 %d~%d，当前方向 SWAP=%d INVERT_X=%d INVERT_Y=%d\n",
                   CFG_TOUCH_RAW_MIN, CFG_TOUCH_RAW_MAX, CFG_TOUCH_SWAP_XY,
                   CFG_TOUCH_INVERT_X, CFG_TOUCH_INVERT_Y);
