@@ -5,6 +5,7 @@
 #include "DisplayLib.h"
 #include "HuskyLib.h"
 #include "SerialCmdLib.h"
+#include "StepperLib.h"
 #include "SysInfoLib.h"
 
 // 全工程唯一配置来源（引脚/任务节奏/开关都在这里）
@@ -20,12 +21,14 @@
 //   SysInfoLib    RAM/PSRAM/Flash/运行时间采集
 //   ButtonLib     按键消抖 + 事件队列（自带 buttonTask）
 //   SerialCmdLib  串口命令行解析 + 分派（自带 serialCmdTask）
+//   StepperLib    28BYJ-48/ULN2003 步进驱动（宏可切 42 步进），非阻塞走步 + 软限位
 //
 // 任务与队列流向：
 //   recogTask(核心1)   --HuskyFrame--> DisplayLib.setFrame()  （显示库内部加锁）
 //   monitorTask(核心0) --SystemInfo--> DisplayLib.setSystemInfo() + 串口
 //   buttonTask(库内)   --ButtonQueue--> loop() 翻译成串口命令
 //   serialCmdTask(库内) --CmdQueue--> 各命令回调
+//   cmdMotor/c  --MotorQueue--> stepperTask(核心1) --service()--> motor1/2/3
 //   loop() 只做按键事件转发和短延时，不写业务
 // =============================================================================
 
@@ -40,6 +43,42 @@ static SerialCmdLib cli;
 // 系统信息共享结构体（infoMutex 保护）
 static SemaphoreHandle_t infoMutex = nullptr;
 static SystemInfo systemInfo = {};
+
+// ---- 步进电机：三台各一个对象，引脚全部来自 config.h 第 9 节 ----
+// ⚠️ 只有 stepperTask 能调 service()/run()，别的任务想动电机请发命令进 MotorQueue。
+// 传 nullptr 表示这台电机没接线：begin() 不会碰引脚，service() 立刻返回。
+static const uint8_t STEPPER_PINS_M1[4] = CFG_STEPPER_M1_PINS;
+static const uint8_t STEPPER_PINS_M2[4] = CFG_STEPPER_M2_PINS;
+static const uint8_t STEPPER_PINS_M3[4] = CFG_STEPPER_M3_PINS;
+
+static Stepper28BYJ motor1(CFG_STEPPER_M1_ENABLE ? STEPPER_PINS_M1 : nullptr);
+static Stepper28BYJ motor2(CFG_STEPPER_M2_ENABLE ? STEPPER_PINS_M2 : nullptr);
+static Stepper28BYJ motor3(CFG_STEPPER_M3_ENABLE ? STEPPER_PINS_M3 : nullptr);
+
+// 按下标取电机：0 = M1推出, 1 = M2夹层, 2 = M3升降；传 -1 表示不指定
+static Stepper28BYJ *getMotor(int index) {
+    switch (index) {
+        case 0:
+            return &motor1;
+        case 1:
+            return &motor2;
+        case 2:
+            return &motor3;
+        default:
+            return nullptr;
+    }
+}
+
+// 步进命令队列：串口/按键投递，stepperTask 消费（单一消费者，不用锁）
+static QueueHandle_t MotorQueue = nullptr;
+
+// 电机名字，打印用；下标 0~2 对应 motor1~motor3
+static const char *MOTOR_NAME[3] = { "M1推出", "M2夹层", "M3升降" };
+
+// 软限位行程，下标 0~2 对应 motor1~motor3
+static const int32_t MOTOR_RANGE[3] = { CFG_STEPPER_M1_RANGE_STEPS,
+                                        CFG_STEPPER_M2_RANGE_STEPS,
+                                        CFG_STEPPER_M3_RANGE_STEPS };
 
 // 本帧是否已经把“新识别到的书”记进显示库（防止同一次识别重复计次）
 static int32_t lastCountedId = -1;
@@ -67,6 +106,13 @@ static void cmdLoadSlot(const char *arg);
 static void cmdParam(const char *arg);
 static void cmdBooks(const char *arg);
 static void cmdClearBooks(const char *arg);
+static void cmdMotor(const char *arg);
+static void cmdStopMotor(const char *arg);
+static Stepper28BYJ *getMotor(int index);
+static char *parseMotorCmd(char *line, int *outIndex);
+static void runMotor(int index, int32_t steps);
+static void printStepperState();
+static void stepperTask(void *pvParameters);
 
 // -----------------------------------------------------------------------------
 // 工具
@@ -118,6 +164,7 @@ static void printStatus() {
     }
     sysInfoPrint(snap);
     Serial.printf("已记录书数: %d\n", (int)display.bookCount());
+    printStepperState();
 }
 
 // -----------------------------------------------------------------------------
@@ -218,6 +265,206 @@ static void cmdClearBooks(const char *arg) {
     Serial.println("已清空书列表记录");
 }
 
+// 解析步进命令：[电机号,]动作。line 形如 "1,300" / "1,-300" / "z" / "s1500"
+// 返回去掉“电机号,”之后的动作串；*outIndex 回填 0~2，没写电机号就保持原值。
+static char *parseMotorCmd(char *line, int *outIndex) {
+    int first = atoi(line);  // 字符串开头不是数字时 atoi 返回 0
+    if (line[0] >= '1' && line[0] <= '3' && first >= 1 && first <= 3) {
+        char *comma = strchr(line, ',');
+        if (comma != nullptr) {
+            *outIndex = first - 1;
+            return comma + 1;
+        }
+    }
+    return line;
+}
+
+// 让某台电机走 steps 步：先把其它电机停掉，避免同时走步
+static void runMotor(int index, int32_t steps) {
+    if (index < 0) {
+        index = 0;  // 默认电机1（推出小车）
+    }
+    if (index > 2) {
+        Serial.println("步进: 电机号只能是 1/2/3");
+        return;
+    }
+
+    Stepper28BYJ *m = getMotor(index);
+    if (m == nullptr || !m->isWired()) {
+        Serial.printf("步进: %s 没接线/没启用, 先在 config.h 里打开对应的 ENABLE 宏\n",
+                      MOTOR_NAME[index]);
+        return;
+    }
+
+    // 同一时间只动一台：别的先停
+    for (int i = 0; i < 3; i++) {
+        if (i != index) {
+            Stepper28BYJ *other = getMotor(i);
+            if (other != nullptr) {
+                other->stop();
+            }
+        }
+    }
+
+    if (!m->run(steps)) {
+        Serial.printf("步进: %s 步数 %ld 不合法（0 或超过 CFG_STEPPER_MAX_STEPS=%d）\n",
+                      MOTOR_NAME[index], (long)steps, CFG_STEPPER_MAX_STEPS);
+        return;
+    }
+
+    // 估算耗时：步数 × 每步延时，串口上给个心理准备
+    uint32_t us = (uint32_t)(steps > 0 ? steps : -steps) * m->stepDelayUs();
+    Serial.printf("步进: %s %s %ld 步, 速度 %luus/步, 预计 %lu.%01lus\n",
+                  MOTOR_NAME[index], (steps > 0) ? "正转" : "反转",
+                  (long)(steps > 0 ? steps : -steps),
+                  (unsigned long)m->stepDelayUs(), (unsigned long)(us / 1000000UL),
+                  (unsigned long)((us / 100000UL) % 10UL));
+    Serial.println("  提示: 上电位置就是零点, 没有限位开关; 软限位到边会自动停。");
+}
+
+// 打印三台电机状态（串口命令 m,? 和 i 都用它）
+static void printStepperState() {
+    Serial.printf("步进(驱动=%s, 模式=%s, 步/圈=%d):\n",
+                  (CFG_STEPPER_DRIVER == 0) ? "28BYJ+ULN2003" : "42步进+驱动器",
+                  (CFG_STEPPER_WAVE_MODE == 0) ? "八拍半步" : "四拍整步",
+                  STEPPER_STEPS_PER_REV);
+
+    for (int i = 0; i < 3; i++) {
+        Stepper28BYJ *m = getMotor(i);
+        if (m == nullptr || !m->isWired()) {
+            Serial.printf("  %s: 未接线/未启用\n", MOTOR_NAME[i]);
+            continue;
+        }
+        Serial.printf("  %s: pos=%ld 步, %s, 剩余=%ld, 速度=%luus/步, 软限位=%ld\n",
+                      MOTOR_NAME[i], (long)m->position(),
+                      m->busy() ? "在走" : "停止", (long)m->stepsLeft(),
+                      (unsigned long)m->stepDelayUs(), (long)m->rangeSteps());
+    }
+}
+
+// =============================================================================
+// 步进电机任务：唯一接触电机引脚的任务
+//
+// 串口/按键只往 MotorQueue 投命令，本任务消费命令并推进电机状态机。
+// 一次只服务一台电机（runMotor 里会先停掉其它电机），避免三台同时走步把
+// 电流和 CPU 都拉满；真要同时动再改成每台一个 service()。
+// =============================================================================
+static void stepperTask(void *pvParameters) {
+    Serial.println("步进任务: 已启动");
+
+    for (;;) {
+        // ---- 1) 收命令（非阻塞，队列空就往下走）----
+        char line[CFG_STEPPER_CMD_LEN];
+        if (MotorQueue != nullptr &&
+            xQueueReceive(MotorQueue, line, 0) == pdPASS) {
+            int midx = -1;
+            char *body = parseMotorCmd(line, &midx);
+
+            char action = body[0];
+            if (action == '\0') {
+                Serial.println("步进: 命令为空, 用法 m,<电机>,<步数> | m,z | m,?");
+            } else if (action == 'z' || action == 'Z') {
+                cmdStopMotor(nullptr);  // 参数为 nullptr = 停全部
+            } else if (action == '?') {
+                printStepperState();
+            } else if (action == 's' || action == 'S') {
+                // m,2,s500  或直接 m,s500：改速度（两步之间的延时，单位 us）
+                long v = atol(body + 1);
+                if (v < 0) {
+                    v = -v;
+                }
+                if (v == 0) {
+                    Serial.println("步进: 速度参数不对, 例 m,2,s1500");
+                } else {
+                    motor1.setStepDelayUs((uint32_t)v);
+                    motor2.setStepDelayUs((uint32_t)v);
+                    motor3.setStepDelayUs((uint32_t)v);
+                    Serial.printf("步进: 三台速度都改成 %ldus/步\n", v);
+                }
+            } else {
+                // 剩下的按“步数”处理：m,1,-300 / m,-300 / m,300
+                long steps = atol(body);
+                if (steps == 0 && body[0] != '0') {
+                    Serial.println("步进: 看不懂这条命令, 输入 m 看用法");
+                } else {
+                    runMotor(midx, (int32_t)steps);
+                }
+            }
+        }
+
+        // ---- 2) 推进三台电机的状态机（没在走的立刻返回）----
+        motor1.service();
+        motor2.service();
+        motor3.service();
+
+        // 还有电机在走就快点轮询，都停了就慢点，省 CPU
+        bool anyMoving = motor1.busy() || motor2.busy() || motor3.busy();
+        vTaskDelay(pdMS_TO_TICKS(anyMoving ? STEPPER_SERVICE_INTERVAL_MS : 10));
+    }
+}
+
+// 串口命令 m：步进电机手动调试
+//   m              看用法
+//   m,?            打印三台电机的状态
+//   m,1,300        电机1 正转 300 步
+//   m,1,-300       电机1 反转 300 步
+//   m,300          不写电机号，默认电机1
+//   m,z            全部急停
+//   m,2,z          只停电机2
+//   m,s1500        三台速度都改成 1500us/步
+static void cmdMotor(const char *arg) {
+    if (arg == nullptr || arg[0] == '\0') {
+        Serial.println("步进命令用法:");
+        Serial.println("  m            看这段用法");
+        Serial.println("  m,?          打印三台电机状态(位置/行程/速度)");
+        Serial.println("  m,1,300      电机1 正转 300 步");
+        Serial.println("  m,1,-300     电机1 反转 300 步");
+        Serial.println("  m,300        不写电机号, 默认电机1");
+        Serial.println("  m,z          全部急停");
+        Serial.println("  m,2,z        只停电机2");
+        Serial.println("  m,s1500      三台速度都改成 1500us/步");
+        Serial.println("  电机号: 1=推出小车(Y)  2=中间夹层  3=升降平台");
+        Serial.println("  注意: 上电位置就是零点, 没有限位开关, 先小步数试方向!");
+        return;
+    }
+    if (MotorQueue == nullptr) {
+        Serial.println("步进: 队列没建好");
+        return;
+    }
+    if (xQueueSend(MotorQueue, arg, pdMS_TO_TICKS(50)) == pdPASS) {
+        Serial.printf("步进: 已下发 [m,%s]\n", arg);
+    } else {
+        Serial.println("步进: 命令队列满, 稍后再试");
+    }
+}
+
+static void cmdStopMotor(const char *arg) {
+    int index = -1;
+    if (arg != nullptr && arg[0] != '\0') {
+        index = atoi(arg);
+        if (index != 1 && index != 2 && index != 3) {
+            Serial.println("步进: 电机号只能是 1/2/3, 不给就是全部");
+            return;
+        }
+    }
+
+    if (index < 0) {
+        motor1.stop();
+        motor2.stop();
+        motor3.stop();
+        Serial.println("步进: 三台全部停机");
+        return;
+    }
+
+    Stepper28BYJ *m = getMotor(index - 1);
+    if (m == nullptr) {
+        Serial.println("步进: 电机号不对");
+        return;
+    }
+    m->stop();
+    Serial.printf("步进: %s 已停机\n", MOTOR_NAME[index - 1]);
+}
+
 // 注册所有串口命令
 static void registerCommands() {
     cli.registerCommand('?', "帮助", cmdHelp);
@@ -234,6 +481,8 @@ static void registerCommands() {
     cli.registerCommand('p', "读算法参数(调试OCR)", cmdParam);
     cli.registerCommand('b', "看书列表页并打印数量", cmdBooks);
     cli.registerCommand('c', "清空书列表记录", cmdClearBooks);
+    cli.registerCommand('m', "步进电机(手动调试): m 看用法, m,1,300 / m,z", cmdMotor);
+    cli.registerCommand('z', "步进急停: z 全停, z,2 停电机2", cmdStopMotor);
 }
 
 // -----------------------------------------------------------------------------
@@ -405,6 +654,31 @@ void setup() {
     registerCommands();
     cli.startTask();
 
+    // ---- 步进电机初始化 ----
+    // 三台电机共用一套速度；每台按 config.h 的行程设软限位。
+    // 没接线的电机（ENABLE=0）这里会直接跳过，不会碰 GPIO。
+    if (CFG_RUN_STEPPER) {
+        MotorQueue = xQueueCreate(CFG_STEPPER_QUEUE_SIZE, CFG_STEPPER_CMD_LEN);
+        if (MotorQueue == nullptr) {
+            Serial.println("步进: 命令队列创建失败");
+        }
+
+        for (int i = 0; i < 3; i++) {
+            Stepper28BYJ *m = getMotor(i);
+            if (m == nullptr || !m->isWired()) {
+                continue;
+            }
+            m->setStepDelayUs(CFG_STEPPER_STEP_DELAY_US);
+            m->setRangeSteps(MOTOR_RANGE[i]);
+            m->begin();
+        }
+        Serial.printf("步进: 已初始化(驱动=%s, 速度=%dus/步)\n",
+                      (CFG_STEPPER_DRIVER == 0) ? "28BYJ+ULN2003"
+                                                : "42步进+驱动器",
+                      CFG_STEPPER_STEP_DELAY_US);
+        printStepperState();
+    }
+
     // ---- 首次采集系统信息，让屏幕第一页就有数据 ----
     sysInfoCollect(systemInfo);
     if (CFG_RUN_DISPLAY) {
@@ -428,7 +702,15 @@ void setup() {
                             CFG_PRIO_MONITOR, nullptr, CFG_CORE_MONITOR);
 #endif
 
-    // 步进与超声波任务在后面的步骤里加，这里先把开关状态打出来
+    // 步进任务独占电机引脚，和 recogTask 一起放核心 1（互不抢总线）
+#if CFG_ENABLE_STEPPER
+    xTaskCreatePinnedToCore(stepperTask, "stepper", CFG_STACK_STEPPER, nullptr,
+                            CFG_PRIO_STEPPER, nullptr, CFG_CORE_STEPPER);
+#else
+    Serial.println("步进任务: 已在 config.h 里关掉 (CFG_ENABLE_STEPPER=0)");
+#endif
+
+    // 超声波任务在下一步骤里加，这里先把开关状态打出来
     Serial.printf("模块开关: husky=%d display=%d sysinfo=%d button=%d cmd=%d "
                   "stepper=%d wave=%d\n",
                   CFG_RUN_HUSKY, CFG_RUN_DISPLAY, CFG_RUN_SYSINFO,

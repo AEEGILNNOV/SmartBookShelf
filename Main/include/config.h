@@ -626,6 +626,13 @@
 #define CFG_STEPPER42_LEAD_MM 4.0f         // T8 丝杆导程 4mm/圈
 #endif
 
+// 42 步进驱动器的 EN（使能）脚是否低有效。
+// 常见模块（A4988/DRV8825/TMC 系）都是低有效，所以默认 1；
+// 如果你的模块是高有效，改成 0。
+#ifndef CFG_STEPPER_EN_ACTIVE_LOW
+#define CFG_STEPPER_EN_ACTIVE_LOW 1
+#endif
+
 // 步进任务/命令队列
 #ifndef CFG_STEPPER_QUEUE_SIZE
 #define CFG_STEPPER_QUEUE_SIZE 8
