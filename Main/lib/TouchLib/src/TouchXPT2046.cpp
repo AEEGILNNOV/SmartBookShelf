@@ -20,6 +20,7 @@ TouchXPT2046::TouchXPT2046() {
     _clk = -1;
     _din = -1;
     _miso = -1;
+    _lastZ = 0;
 }
 
 void TouchXPT2046::begin(int cs, int irq, int clk, int din, int miso) {
@@ -75,11 +76,12 @@ uint16_t TouchXPT2046::readAxis(uint8_t cmd) {
     return value;
 }
 
-// 只读原始值，不做窗口过滤（排线/查芯片有没有回数据用）
-void TouchXPT2046::readRaw(uint16_t *x, uint16_t *y) {
+// 只读原始值，不做任何过滤（排线/查芯片有没有回数据用）
+void TouchXPT2046::readRaw(uint16_t *x, uint16_t *y, uint16_t *z) {
     if (_cs < 0) {
         *x = 0;
         *y = 0;
+        *z = 0;
         return;
     }
 
@@ -94,6 +96,38 @@ void TouchXPT2046::readRaw(uint16_t *x, uint16_t *y) {
 
     *x = (uint16_t)(xs / (uint32_t)samples);
     *y = (uint16_t)(ys / (uint32_t)samples);
+    *z = readPressure();       // 压力值也一起给（read() 用它判断“按得够不够重”）
+}
+
+// 压力值 Z：XPT2046 用 Z1(0xB0)/Z2(0xC0) 两个通道差分算出来，和 TFT_eSPI 的算法一致。
+// 值越大 = 按得越重；读到 4095（0xFFF）表示“其实没按”，TFT_eSPI 也把它当 0。
+uint16_t TouchXPT2046::readPressure() {
+    if (_cs < 0) {
+        _lastZ = 0;
+        return 0;
+    }
+
+    uint32_t sum = 0;
+    const int samples = CFG_TOUCH_SAMPLES;
+
+    for (int i = 0; i < samples; i++) {
+        uint16_t z1 = readAxis(0xB0);
+        uint16_t z2 = readAxis(0xC0);
+        int32_t z = 4095 + (int32_t)(z1 >> 3) - (int32_t)(z2 >> 3);
+        if (z == 4095) {
+            z = 0;  // 和 TFT_eSPI 一样：4095 = 没按
+        }
+        if (z < 0) {
+            z = 0;
+        }
+        if (z > 4095) {
+            z = 4095;
+        }
+        sum += (uint32_t)z;
+    }
+
+    _lastZ = (uint16_t)(sum / (uint32_t)samples);
+    return _lastZ;
 }
 
 // T_IRQ 电平：-1 没接，0 LOW（按下），1 HIGH（空闲）
@@ -104,7 +138,9 @@ int TouchXPT2046::irqLevel() {
     return digitalRead(_irq) == LOW ? 0 : 1;
 }
 
-// 读一次触点：多采几次取平均，再按有效窗口过滤“其实没人按”的情况
+// 读一次触点：
+//   1) 先看坐标在不在窗口内（不在 = 没人按，这样空闲时不用白读压力，省时间）
+//   2) 再看压力够不够（CFG_TOUCH_PRESSURE_MIN = 灵敏度/触发阈值）
 bool TouchXPT2046::read(uint16_t *x, uint16_t *y) {
     if (_cs < 0) {
         return false;
@@ -112,11 +148,26 @@ bool TouchXPT2046::read(uint16_t *x, uint16_t *y) {
 
     uint16_t xa = 0;
     uint16_t ya = 0;
-    readRaw(&xa, &ya);
+    uint32_t xs = 0;
+    uint32_t ys = 0;
+    const int samples = CFG_TOUCH_SAMPLES;
 
-    // 原始值落在窗口外当作“没按”（窗口在 config.h 里调）
+    for (int i = 0; i < samples; i++) {
+        xs += readAxis(0xD0);  // X
+        ys += readAxis(0x90);  // Y
+    }
+    xa = (uint16_t)(xs / (uint32_t)samples);
+    ya = (uint16_t)(ys / (uint32_t)samples);
+
+    // 坐标窗口：落在外面当作“没按”（窗口在 config.h 里调）
     if (xa < CFG_TOUCH_RAW_MIN || xa > CFG_TOUCH_RAW_MAX ||
         ya < CFG_TOUCH_RAW_MIN || ya > CFG_TOUCH_RAW_MAX) {
+        return false;
+    }
+
+    // 压力阈值：这就是“灵敏度”。调大 = 要按得更重才认，调 0 = 不判压力。
+    uint16_t z = readPressure();
+    if (z < CFG_TOUCH_PRESSURE_MIN) {
         return false;
     }
 
@@ -127,12 +178,12 @@ bool TouchXPT2046::read(uint16_t *x, uint16_t *y) {
 
 void TouchXPT2046::printConfig() const {
     Serial.printf("触摸(XPT2046): T_CS=%d T_IRQ=%d T_CLK=%d T_DIN=%d T_DO=%d | "
-                  "原始窗口 %d~%d, 每轴采样 %d 次\n",
+                  "坐标窗口 %d~%d, 压力阈值 %d, 每轴采样 %d 次\n",
                   _cs, _irq, _clk, _din, _miso, CFG_TOUCH_RAW_MIN,
-                  CFG_TOUCH_RAW_MAX, CFG_TOUCH_SAMPLES);
-    Serial.printf("  轴方向: SWAP_XY=%d INVERT_X=%d INVERT_Y=%d "
-                  "(不对就改 config.h 第 3.2 节的这三个宏)\n",
-                  CFG_TOUCH_SWAP_XY, CFG_TOUCH_INVERT_X, CFG_TOUCH_INVERT_Y);
+                  CFG_TOUCH_RAW_MAX, CFG_TOUCH_PRESSURE_MIN, CFG_TOUCH_SAMPLES);
+    Serial.printf("  灵敏度=压力阈值 %d（调大=按更重才触发）；轴方向 SWAP_XY=%d INVERT_X=%d INVERT_Y=%d\n",
+                  CFG_TOUCH_PRESSURE_MIN, CFG_TOUCH_SWAP_XY, CFG_TOUCH_INVERT_X,
+                  CFG_TOUCH_INVERT_Y);
 }
 
 const char *touchLibVersion() {

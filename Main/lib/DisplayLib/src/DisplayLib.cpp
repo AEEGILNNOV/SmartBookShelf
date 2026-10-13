@@ -70,6 +70,7 @@ static uint16_t s_touchX = 0;              // 换算后的屏幕坐标
 static uint16_t s_touchY = 0;
 static uint16_t s_touchRawX = 0;           // XPT2046 原始值（校准/排错看它）
 static uint16_t s_touchRawY = 0;
+static uint16_t s_touchZ = 0;              // 压力值（灵敏度阈值就是比它）
 static uint32_t s_touchPressCount = 0;     // 累计按下次数（原始触摸）
 static uint32_t s_btnClickCount = 0;       // 测试按钮被点了几次
 
@@ -255,6 +256,7 @@ static void touchReadCb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     if (s_touch.read(&rawX, &rawY)) {
         s_touchRawX = rawX;
         s_touchRawY = rawY;
+        s_touchZ = s_touch.lastPressure();
 
         if (!s_touchPressed) {
             s_touchPressCount++;  // 只统计“按下”这一瞬间，不按读取次数计
@@ -1119,10 +1121,12 @@ void DisplayLib::printDiag() {
     Serial.printf("  触摸: T_CS=%d T_IRQ=%d T_CLK=%d T_DIN=%d T_DO=%d, 轮询 %dms\n",
                   PIN_TOUCH_CS, PIN_TOUCH_IRQ, PIN_TOUCH_CLK, PIN_TOUCH_DIN,
                   PIN_TOUCH_DO, CFG_TOUCH_READ_MS);
-    Serial.printf("        状态=%s 屏幕=%u,%u 原始=%u,%u\n",
+    Serial.printf("        状态=%s 屏幕=%u,%u 原始=%u,%u 压力Z=%u\n",
                   s_touchPressed ? "按下" : "松开", (unsigned)s_touchX,
                   (unsigned)s_touchY, (unsigned)s_touchRawX,
-                  (unsigned)s_touchRawY);
+                  (unsigned)s_touchRawY, (unsigned)s_touchZ);
+    Serial.printf("        压力阈值(灵敏度) %d：调大=要按更重，调小=更灵敏，0=不判\n",
+                  CFG_TOUCH_PRESSURE_MIN);
     Serial.printf("        按下 %lu 次, 测试按钮 %lu 次 | SWAP=%d INVERT_X=%d INVERT_Y=%d\n",
                   (unsigned long)s_touchPressCount, (unsigned long)s_btnClickCount,
                   CFG_TOUCH_SWAP_XY, CFG_TOUCH_INVERT_X, CFG_TOUCH_INVERT_Y);
@@ -1166,12 +1170,16 @@ static uint32_t computeSignature(const HuskyFrame &f, const SystemInfo &info,
     sig = (sig ^ wave.filteredMm) * 16777619UL;
     sig = (sig ^ (uint32_t)(wave.valid ? 1 : 0)) * 16777619UL;
 
-    // 触摸状态也进签名：按下/移动/计数变化时触摸页要跟着刷
+    // 触摸状态也进签名：按下/移动/计数变化时触摸页要跟着刷。
+    // 只在“按下”时用实时坐标参与签名——松手后坐标不再变，屏幕就不用一直重画了。
     sig = (sig ^ (uint32_t)(s_touchPressed ? 1 : 0)) * 16777619UL;
-    sig = (sig ^ (uint32_t)s_touchX) * 16777619UL;
-    sig = (sig ^ (uint32_t)s_touchY) * 16777619UL;
-    sig = (sig ^ (uint32_t)s_touchRawX) * 16777619UL;
-    sig = (sig ^ (uint32_t)s_touchRawY) * 16777619UL;
+    if (s_touchPressed) {
+        sig = (sig ^ (uint32_t)s_touchX) * 16777619UL;
+        sig = (sig ^ (uint32_t)s_touchY) * 16777619UL;
+        sig = (sig ^ (uint32_t)s_touchRawX) * 16777619UL;
+        sig = (sig ^ (uint32_t)s_touchRawY) * 16777619UL;
+        sig = (sig ^ (uint32_t)s_touchZ) * 16777619UL;
+    }
     sig = (sig ^ s_btnClickCount) * 16777619UL;
     sig = (sig ^ s_touchPressCount) * 16777619UL;
 
@@ -1476,19 +1484,20 @@ void DisplayLib::showTouchPage() {
 #else
     if (s_touchPressed) {
         snprintf(body, sizeof(body),
-                 "触摸: 按下中\n屏幕: %u, %u\n原始: %u, %u\n\n"
-                 "按住拖动，看坐标跟不跟手",
+                 "触摸: 按下中\n屏幕: %u, %u\n原始: %u, %u   压力 Z=%u\n\n"
+                 "Z 要 >= %d 才算按下（嫌灵敏就调大）",
                  (unsigned)s_touchX, (unsigned)s_touchY,
-                 (unsigned)s_touchRawX, (unsigned)s_touchRawY);
+                 (unsigned)s_touchRawX, (unsigned)s_touchRawY,
+                 (unsigned)s_touchZ, CFG_TOUCH_PRESSURE_MIN);
     } else {
         snprintf(body, sizeof(body),
                  "触摸: 松开\n屏幕: %u, %u   原始: %u, %u\n"
-                 "按下 %lu 次   按钮点击 %lu 次\n\n"
-                 "没反应: d,2 看诊断 / d,3 采样原始值",
+                 "按下 %lu 次   按钮点击 %lu 次\n"
+                 "压力阈值 %d（d,6 看实时 Z）",
                  (unsigned)s_touchX, (unsigned)s_touchY,
                  (unsigned)s_touchRawX, (unsigned)s_touchRawY,
                  (unsigned long)s_touchPressCount,
-                 (unsigned long)s_btnClickCount);
+                 (unsigned long)s_btnClickCount, CFG_TOUCH_PRESSURE_MIN);
     }
 #endif
 
@@ -1517,17 +1526,23 @@ void DisplayLib::runTouchDump() {
     int irq = s_touch.irqLevel();
     Serial.printf("--- 触摸原始值 4 次采样 (T_IRQ=%s) ---\n",
                   (irq < 0) ? "未接" : (irq == 0 ? "LOW(有触摸)" : "HIGH(空闲)"));
-    Serial.println("  按住屏幕不放、连着敲几次 d,6：T_IRQ 应该变 LOW，原始值也应该跟着变");
+    Serial.println("  按住屏幕不放、连着敲几次 d,6：T_IRQ 应该变 LOW，Z 应该变大");
+    Serial.printf("  判断“算不算按下”的两个条件：坐标 %d~%d，压力 Z >= %d\n",
+                  CFG_TOUCH_RAW_MIN, CFG_TOUCH_RAW_MAX, CFG_TOUCH_PRESSURE_MIN);
     for (int i = 0; i < 4; i++) {
         uint16_t rx = 0;
         uint16_t ry = 0;
-        s_touch.readRaw(&rx, &ry);
+        uint16_t rz = 0;
+        s_touch.readRaw(&rx, &ry, &rz);
         int irqNow = s_touch.irqLevel();
-        Serial.printf("  %d: 原始 %u, %u   T_IRQ=%s\n", i + 1, (unsigned)rx,
-                      (unsigned)ry,
-                      (irqNow < 0) ? "未接" : (irqNow == 0 ? "LOW" : "HIGH"));
+        Serial.printf("  %d: 原始 %u, %u   压力 Z=%u   T_IRQ=%s%s\n", i + 1,
+                      (unsigned)rx, (unsigned)ry, (unsigned)rz,
+                      (irqNow < 0) ? "未接" : (irqNow == 0 ? "LOW" : "HIGH"),
+                      (rz >= CFG_TOUCH_PRESSURE_MIN) ? "  <- 够重，会算按下" : "");
         vTaskDelay(pdMS_TO_TICKS(120));
     }
+    Serial.println("  调灵敏度：把 CFG_TOUCH_PRESSURE_MIN 设成“轻碰的最大 Z”和“正常按的 Z”之间");
+    Serial.println("    嫌灵敏 -> 调大；嫌迟钝 -> 调小；设 0 = 不判压力");
     Serial.printf("  有效窗口 %d~%d，当前方向 SWAP=%d INVERT_X=%d INVERT_Y=%d\n",
                   CFG_TOUCH_RAW_MIN, CFG_TOUCH_RAW_MAX, CFG_TOUCH_SWAP_XY,
                   CFG_TOUCH_INVERT_X, CFG_TOUCH_INVERT_Y);

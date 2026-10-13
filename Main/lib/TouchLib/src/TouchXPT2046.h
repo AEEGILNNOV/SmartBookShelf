@@ -30,12 +30,19 @@ public:
     // 传 -1 表示这根线不接（T_IRQ 允许不接；其余四根必须给）
     void begin(int cs, int irq, int clk, int din, int miso);
 
-    // 读一次触点：返回 true = 落在有效窗口内，x/y 是**原始值**（还要换算成屏幕坐标）
+    // 读一次触点：返回 true = 既落在坐标窗口内、又按得够重（超过压力阈值）
     bool read(uint16_t *x, uint16_t *y);
 
-    // 只读原始值、**不做窗口过滤**：查接线/看芯片到底有没有回数据时用它。
+    // 只读原始值、**不做任何过滤**：查接线/看芯片到底有没有回数据时用它。
     // 全 4095（0xFFF）= T_DO 悬空被上拉（芯片没回数据）；全 0 = 数据线被拉低或芯片没响应。
-    void readRaw(uint16_t *x, uint16_t *y);
+    void readRaw(uint16_t *x, uint16_t *y, uint16_t *z);
+
+    // 只读压力值 Z（XPT2046 的 Z1/Z2 差分）：值越大 = 按得越重。
+    // 这就是“灵敏度/触发阈值”的判据，见 config.h 的 CFG_TOUCH_PRESSURE_MIN。
+    uint16_t readPressure();
+
+    // 最近一次读到的压力值（read()/readRaw() 里都会更新），串口排错用
+    uint16_t lastPressure() const { return _lastZ; }
 
     // T_IRQ 电平：-1 = 没接这个脚；0 = LOW（有触摸，XPT2046 是低有效）；1 = HIGH（空闲）。
     // 手指按住屏幕时它会变 0，是判断“触摸模块有没有供电/接线”最快的一招。
@@ -56,6 +63,7 @@ private:
     int _clk;
     int _din;
     int _miso;
+    uint16_t _lastZ;   // 最近一次读到的压力值
 };
 
 const char *touchLibVersion();
