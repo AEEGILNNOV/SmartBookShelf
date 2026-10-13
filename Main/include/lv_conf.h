@@ -75,6 +75,10 @@
 #define LV_USE_TABVIEW 1
 #define LV_USE_THEME_DEFAULT 1
 
+// 输入设备（触摸）：轮询周期由 config.h 的 CFG_TOUCH_READ_MS 决定，
+// 一个参数同时管 LVGL 的读取节拍和业务侧的预期，不用改两处。
+#define LV_INDEV_DEF_READ_PERIOD CFG_TOUCH_READ_MS
+
 // LVGL 自己的日志：开关在 config.h 的 CFG_LV_LOG_TO_SERIAL（默认 0 = 和原来一样不打印）。
 // 打开后 DisplayLib::begin() 会注册一个回调把日志写到 Serial，
 // 这样像“字体是压缩的但没开解压”“draw buffer 太大”这类告警就能在串口看到。

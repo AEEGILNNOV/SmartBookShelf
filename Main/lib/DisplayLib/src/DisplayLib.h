@@ -34,7 +34,8 @@
 #define PAGE_SYSINFO 0x01   // 系统信息页：RAM/PSRAM/Flash/运行时间
 #define PAGE_BOOKS   0x02   // 已识别书列表页
 #define PAGE_WAVE    0x03   // 超声波测距页（HC-SR04）
-#define PAGE_COUNT   4
+#define PAGE_TOUCH   0x04   // 触摸测试页（按钮 + 坐标/原始值）
+#define PAGE_COUNT   5
 
 // 屏幕分辨率：从 TFT_eSPI 的宏推导（本头文件已在上面 include 过 <TFT_eSPI.h>）。
 // 业务代码算坐标一律用 SCR_W/SCR_H，不要写死 240/320。
@@ -84,6 +85,8 @@ public:
     void requestRawTest(uint32_t holdMs = CFG_SELFTEST_BAR_HOLD_MS);
     // 请求一次 SPI 总线测速（由 displayTask 执行）：量“MCU 到底有没有在往屏上吐像素”
     void requestBusTest();
+    // 请求一次触摸原始值采样（d,3）：在屏四角各按一下，再敲一次 d,3 会打印极值与轴方向建议
+    void requestTouchSample();
 
     // 串口帮助里打印页说明
     static void printHelp();
@@ -109,6 +112,11 @@ private:
     void handleSelfTest();
     void runRawTest(uint32_t holdMs);
     void restoreScreenAfterTest();
+    void runTouchSample();
+
+    // 触摸测试页：建按钮面板 + 刷新页面文字
+    void createTouchUi();
+    void showTouchPage();
 
 #if CFG_DISPLAY_BRINGUP == 2
     // 排错模式 2 的纯色块页面（一个字体都不碰）

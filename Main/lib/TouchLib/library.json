@@ -1,0 +1,11 @@
+{
+  "name": "TouchLib",
+  "version": "1.0.0",
+  "description": "XPT2046 电阻触摸驱动（独立 5 线位操作版，配 ILI9341 240x320 模块）",
+  "keywords": "touch, xpt2046, esp32",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "srcDir": "src"
+  }
+}

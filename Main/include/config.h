@@ -31,14 +31,15 @@
 //   实际可用：GPIO 0-18、38-42、45-48
 //
 // 【引脚占用总表（改线只改这里）】
-//   ILI9341 屏   SCLK=12 MOSI=11 CS=10 DC=9 RST=8 BL=47
+//   ILI9341 屏   SCLK=12 MOSI=11 CS=10 DC=9 RST=8 BL=47（MISO 不接）
 //   HUSKYLENS 2  SDA=1  SCL=2
 //   按键         BTN1=45 BTN2=46 BTN3=0     （0 是 BOOT 脚，见第 9 节警告）
+//   触摸 XPT2046 T_CS=38 T_IRQ=39 T_CLK=40 T_DIN=41 T_DO=42（独立 5 线，见第 3.2 节）
 //   步进电机1    4,5,6,7                     （ULN2003 的 IN1~IN4）
 //   步进电机2    15,16,17,18                 （ULN2003 的 IN1~IN4）
-//   步进电机3    38,39,48,21                 （机械到位后再接）
+//   步进电机3    38,39,48,21                 （机械到位后再接；38/39 与触摸冲突，二选一）
 //   HC-SR04      TRIG=4 ECHO=5               （与电机1冲突，二选一，见第 8 节）
-//   空闲未用     3,13,14,20,39,48,21 …
+//   空闲未用     3,13,14,20,48,21 …
 // =============================================================================
 
 
@@ -151,6 +152,10 @@
 #define PIN_TFT_BL 47
 #endif
 
+// 屏的 SDO/MISO：本方案不接（不读屏 ID，读回来是 0 属正常）。
+// ⚠️ 触摸不靠这个脚！XPT2046 走独立的 5 根线，见下面第 3.2 节。
+#define PIN_TFT_MISO (-1)
+
 // 分辨率：SCR_W/SCR_H 不在本文件定义，它们在 DisplayLib.h 里从 TFT_WIDTH/TFT_HEIGHT
 // 推导（因为本文件会被不碰屏幕的库 include，那时 TFT_WIDTH 还不存在）。
 // 下面这段只做“包含顺序”体检：如果已经 include 了 <TFT_eSPI.h>，却拿不到 TFT_WIDTH，
@@ -256,6 +261,92 @@
 #ifndef CFG_LV_LOG_TO_SERIAL
 #define CFG_LV_LOG_TO_SERIAL 0
 #endif
+
+
+// -----------------------------------------------------------------------------
+// 3.2 触摸（XPT2046，独立 5 根线）
+//
+// 【为什么以前完全没反应】不是接线坏，是代码里压根没有这一路：
+//   · 本工程的触摸**不走屏的 SPI**，用的是触摸模块自己的 T_CLK/T_DIN/T_DO 三根线，
+//     再配 T_CS/T_IRQ，由 lib/TouchLib 的 TouchXPT2046 位操作驱动（和
+//     LVGLin240320TFTLCD 参考工程同一套，已在硬件上验证过）；
+//   · 所以 platformio.ini 里的 -DTFT_MISO=-1 / -DTOUCH_CS=-1 都不用动；
+//   · 以前缺的是第 3 步：DisplayLib 从来没有注册 LVGL 输入设备(lv_indev)，
+//     就算读到了坐标，按钮也收不到点击。
+//
+// 【接线（与 LVGLin240320TFTLCD / esp32mouse 参考工程完全一致）】
+//     T_CS  -> GPIO38      T_IRQ -> GPIO39（本工程用轮询，可不接）
+//     T_CLK -> GPIO40      T_DIN -> GPIO41      T_DO -> GPIO42
+//
+// ⚠️ **GPIO38/39 同时是步进电机3 的引脚**（CFG_STEPPER_M3_PINS）。电机3 默认关着，
+//    两者只能二选一；同时打开会在编译期直接报错（见本节末尾的体检）。
+// -----------------------------------------------------------------------------
+#ifndef CFG_ENABLE_TOUCH
+#define CFG_ENABLE_TOUCH 1        // 1 = 注册 LVGL 输入设备 + 显示触摸测试页
+#endif
+
+// 触摸 5 根线（-1 = 这个脚不接）
+#ifndef PIN_TOUCH_CS
+#define PIN_TOUCH_CS 38           // T_CS  片选
+#endif
+#ifndef PIN_TOUCH_IRQ
+#define PIN_TOUCH_IRQ 39          // T_IRQ 中断（可选，轮询方式用不到）
+#endif
+#ifndef PIN_TOUCH_CLK
+#define PIN_TOUCH_CLK 40          // T_CLK 时钟
+#endif
+#ifndef PIN_TOUCH_DIN
+#define PIN_TOUCH_DIN 41          // T_DIN 主机输出
+#endif
+#ifndef PIN_TOUCH_DO
+#define PIN_TOUCH_DO 42           // T_DO  触摸数据回来（相当于 MISO）
+#endif
+
+// 原始值有效窗口：落在窗口外当成“没按”。按面板边缘没反应就把窗口放宽。
+#ifndef CFG_TOUCH_RAW_MIN
+#define CFG_TOUCH_RAW_MIN 50
+#endif
+#ifndef CFG_TOUCH_RAW_MAX
+#define CFG_TOUCH_RAW_MAX 4045
+#endif
+
+// XPT2046 原始值 -> 屏幕坐标的轴方向（照抄参考工程里已经验证过的一组）
+// 现象对照：左右反了改 TOUCH_INVERT_X；上下反了改 TOUCH_INVERT_Y；
+//           手指上下动、屏幕光标左右跑，就把 TOUCH_SWAP_XY 改成 1。
+#ifndef CFG_TOUCH_SWAP_XY
+#define CFG_TOUCH_SWAP_XY 0
+#endif
+#ifndef CFG_TOUCH_INVERT_X
+#define CFG_TOUCH_INVERT_X 1
+#endif
+#ifndef CFG_TOUCH_INVERT_Y
+#define CFG_TOUCH_INVERT_Y 0
+#endif
+
+// 一次 read() 里每个轴采样几次再取平均（参考工程用 3，太小会抖）
+#ifndef CFG_TOUCH_SAMPLES
+#define CFG_TOUCH_SAMPLES 3
+#endif
+
+// LVGL 轮询触摸的周期(ms)：20~30 手感合适，太小费 CPU
+#ifndef CFG_TOUCH_READ_MS
+#define CFG_TOUCH_READ_MS 20
+#endif
+
+// 触摸测试页计数上限（防溢出，够测就行）
+#ifndef CFG_TOUCH_TEST_MAX
+#define CFG_TOUCH_TEST_MAX 9999
+#endif
+
+// ---- 编译期体检 ----
+// 触摸引脚和步进电机3 抢 GPIO38/39：两个都开一定不工作，直接拦下来
+#if CFG_ENABLE_TOUCH && CFG_STEPPER_M3_ENABLE && (PIN_TOUCH_CS == 38 || PIN_TOUCH_IRQ == 39)
+    #error "触摸(T_CS=38/T_IRQ=39) 和步进电机3(38,39,48,21) 抢引脚：把 CFG_STEPPER_M3_ENABLE 或 CFG_ENABLE_TOUCH 关掉一个"
+#endif
+
+// 运行时是否真的启用触摸（编译期常量，条件不满足时整段代码被优化掉）
+#define CFG_RUN_TOUCH (CFG_ENABLE_TOUCH && (PIN_TOUCH_CS >= 0) && (PIN_TOUCH_CLK >= 0) && \
+                       (PIN_TOUCH_DIN >= 0) && (PIN_TOUCH_DO >= 0))
 
 // 一页最多记录几本书（按 ID + 书名去重）
 #ifndef MAX_BOOK_RECORDS
@@ -857,6 +948,9 @@
 #endif
 #ifndef SERIALCMDLIB_VERSION
 #define SERIALCMDLIB_VERSION "1.0.0"
+#endif
+#ifndef TOUCHLIB_VERSION
+#define TOUCHLIB_VERSION "1.0.0"
 #endif
 
 

@@ -131,6 +131,7 @@ static void waveTask(void *pvParameters);
 static void cmdWave(const char *arg);
 static void printWaveState();
 static void cmdDisplay(const char *arg);
+static void cmdTouch(const char *arg);
 
 // -----------------------------------------------------------------------------
 // 工具
@@ -175,6 +176,10 @@ static void printBanner() {
     static const uint8_t m3pins[4] = CFG_STEPPER_M3_PINS;
     Serial.printf("测距: TRIG=%d ECHO=%d (ECHO 必须分压, 与M1冲突)\n",
                   PIN_WAVE_TRIG, PIN_WAVE_ECHO);
+    // 触摸是独立 5 根线，和屏的 SPI、和 TFT_eSPI 的 TOUCH_CS 都没关系
+    Serial.printf("触摸: T_CS=%d T_IRQ=%d T_CLK=%d T_DIN=%d T_DO=%d (开关 CFG_ENABLE_TOUCH=%d)\n",
+                  PIN_TOUCH_CS, PIN_TOUCH_IRQ, PIN_TOUCH_CLK, PIN_TOUCH_DIN,
+                  PIN_TOUCH_DO, CFG_ENABLE_TOUCH);
     Serial.printf("步进: M1=%d,%d,%d,%d M2=%d,%d,%d,%d M3=%d,%d,%d,%d\n",
                   m1pins[0], m1pins[1], m1pins[2], m1pins[3], m2pins[0],
                   m2pins[1], m2pins[2], m2pins[3], m3pins[0], m3pins[1],
@@ -519,7 +524,9 @@ static void registerCommands() {
     //    SerialCmdLib 现在也会拦重复注册并在串口报警。
     cli.registerCommand('u', "超声波测距: u 看状态, u,s 记起点, u,e 算厚度, u,c 清统计",
                         cmdWave);
-    cli.registerCommand('d', "显示诊断: d 看状态, d,1 彩条自检, d,2 SPI 测速", cmdDisplay);
+    cli.registerCommand('d', "显示诊断: d 看状态, d,1 彩条, d,2 SPI测速, d,3 触摸采样",
+                        cmdDisplay);
+    cli.registerCommand('t', "触摸测试页(第5页, 页上有按钮做点击计数)", cmdTouch);
 }
 
 // -----------------------------------------------------------------------------
@@ -883,7 +890,22 @@ static void cmdDisplay(const char *arg) {
         Serial.println("显示: 已请求 SPI 总线测速(由显示任务执行, 结果打印在下面)");
         return;
     }
+    if (arg != nullptr && arg[0] == '3') {
+        display.requestTouchSample();
+        Serial.println("触摸: 已请求原始值采样/查看结果（第一次开始采样, 第二次打印结果）");
+        return;
+    }
     display.printDiag();
+}
+
+// 串口命令 t：跳到触摸测试页（第 5 页），页上有一个大按钮做点击计数
+static void cmdTouch(const char *arg) {
+    display.setPage(PAGE_TOUCH);
+    Serial.printf("屏幕切到触摸测试页(第 %u 页): 点屏上的按钮应该加 1\n",
+                  (unsigned)display.page() + 1);
+    Serial.println("  没反应就看串口有没有 '触摸: 测试按钮第 N 次按下'");
+    Serial.println("  d    = 显示诊断(含触摸状态/坐标/原始值)");
+    Serial.println("  d,3  = 采样触摸原始值(连按两次: 第一次开始, 第二次看结果)");
 }
 
 // =============================================================================

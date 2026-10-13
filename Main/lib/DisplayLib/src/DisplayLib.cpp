@@ -3,6 +3,9 @@
 // 全工程唯一配置来源（刷屏缓冲行数 / 消息停留时间 / 任务栈与核心都在这里）
 #include "config.h"
 
+// 触摸：独立 5 根线的 XPT2046（见 config.h 第 3.2 节）
+#include "TouchXPT2046.h"
+
 // 开机中文字库自检（缺字会打到串口）
 #include "FontCheck.h"
 
@@ -49,6 +52,34 @@ static lv_obj_t *s_barValue = nullptr;
 static lv_obj_t *s_labelFooter = nullptr;
 static lv_obj_t *s_msgPanel = nullptr;
 static lv_obj_t *s_msgLabel = nullptr;
+
+//------------------------------------ 触摸（XPT2046）------------------------------------//
+// 触摸测试页的控件 + 当前触摸状态。
+// ⚠️ 这些变量只在 displayTask 里读写：LVGL 的输入设备回调也是被
+//    lv_timer_handler() 调起来的，和刷屏在同一个任务里，不需要额外加锁。
+static lv_obj_t *s_touchPanel = nullptr;   // 按钮面板（只在触摸页显示）
+static lv_obj_t *s_btnTest = nullptr;      // 大测试按钮
+static lv_obj_t *s_labelBtn = nullptr;     // 按钮上的字（显示点击次数）
+static lv_obj_t *s_btnReset = nullptr;     // 清零按钮
+static lv_indev_drv_t s_indevDrv;
+
+static bool s_touchPressed = false;        // 当前是否有手指按着
+static uint16_t s_touchX = 0;              // 换算后的屏幕坐标
+static uint16_t s_touchY = 0;
+static uint16_t s_touchRawX = 0;           // XPT2046 原始值（校准/排错看它）
+static uint16_t s_touchRawY = 0;
+static uint32_t s_touchPressCount = 0;     // 累计按下次数（原始触摸）
+static uint32_t s_btnClickCount = 0;       // 测试按钮被点了几次
+
+// 原始值采样（串口命令 d,3）：用来核对轴方向/量程，采完在串口打印四角极值
+static bool s_touchSampling = false;
+static uint16_t s_rawMinX = 0xFFFF;
+static uint16_t s_rawMaxX = 0;
+static uint16_t s_rawMinY = 0xFFFF;
+static uint16_t s_rawMaxY = 0;
+
+// 触摸驱动：独立 5 根线的位操作 XPT2046（和参考工程同一套），不占屏的 SPI
+static TouchXPT2046 s_touch;
 
 //每块 draw buffer 占几行：240 x 40 x 2B = 19.2KB，两块都在 PSRAM。
 //行数由 config.h 的 CFG_LV_BUF_LINES 决定（原 DISPLAY_DRAW_LINES 已合并过去），
@@ -136,6 +167,112 @@ static void displayFlushCb(lv_disp_drv_t *drv, const lv_area_t *area,
 
     lv_disp_flush_ready(drv);
 }
+
+// =============================================================================
+// 触摸（XPT2046）：LVGL 输入设备
+//
+// LVGL 需要有人告诉它“现在有没有按下、按在哪”，下面这个回调就是干这个的。
+// 它由 lv_timer_handler() 按 LV_INDEV_DEF_READ_PERIOD（= CFG_TOUCH_READ_MS）调起，
+// 和刷屏、按钮事件都跑在 displayTask 里，所以天然不会并发。
+//
+// 原始值 -> 屏幕坐标的换算照抄参考工程 LVGLin240320TFTLCD：
+//   先按 SWAP/INVERT 调轴方向，再按 4095 满量程线性映射到 SCR_W/SCR_H。
+// =============================================================================
+#if CFG_RUN_TOUCH
+static void touchToScreen(uint16_t rawX, uint16_t rawY, int16_t *sx, int16_t *sy) {
+    int32_t x = rawX;
+    int32_t y = rawY;
+
+#if CFG_TOUCH_SWAP_XY
+    int32_t tmp = x;
+    x = y;
+    y = tmp;
+#endif
+#if CFG_TOUCH_INVERT_X
+    x = 4095 - x;
+#endif
+#if CFG_TOUCH_INVERT_Y
+    y = 4095 - y;
+#endif
+
+    *sx = (int16_t)((int64_t)x * (SCR_W - 1) / 4095);
+    *sy = (int16_t)((int64_t)y * (SCR_H - 1) / 4095);
+}
+
+static void touchReadCb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
+    (void)drv;
+
+    // 松手后 LVGL 还会继续调用本回调，所以要记住最后一次坐标
+    static int16_t lastX = 0;
+    static int16_t lastY = 0;
+
+    uint16_t rawX = 0;
+    uint16_t rawY = 0;
+
+    if (s_touch.read(&rawX, &rawY)) {
+        s_touchRawX = rawX;
+        s_touchRawY = rawY;
+
+        if (!s_touchPressed) {
+            s_touchPressCount++;  // 只统计“按下”这一瞬间，不按读取次数计
+        }
+
+        int16_t sx = 0;
+        int16_t sy = 0;
+        touchToScreen(rawX, rawY, &sx, &sy);
+        s_touchX = (uint16_t)sx;
+        s_touchY = (uint16_t)sy;
+        lastX = sx;
+        lastY = sy;
+
+        // 采样模式：记录原始值极值，给校准/查轴方向用（不会打印，避免刷屏）
+        if (s_touchSampling) {
+            if (rawX < s_rawMinX) s_rawMinX = rawX;
+            if (rawX > s_rawMaxX) s_rawMaxX = rawX;
+            if (rawY < s_rawMinY) s_rawMinY = rawY;
+            if (rawY > s_rawMaxY) s_rawMaxY = rawY;
+        }
+
+        data->state = LV_INDEV_STATE_PRESSED;
+        data->point.x = sx;
+        data->point.y = sy;
+        s_touchPressed = true;
+        return;
+    }
+
+    s_touchPressed = false;
+    data->state = LV_INDEV_STATE_RELEASED;
+    data->point.x = lastX;
+    data->point.y = lastY;
+}
+
+// 测试按钮：点一下计数 +1，并直接写在按钮上（顺便打串口）
+static void onBtnTestClicked(lv_event_t *e) {
+    (void)e;
+    if (s_btnClickCount < CFG_TOUCH_TEST_MAX) {
+        s_btnClickCount++;
+    }
+    if (s_labelBtn != nullptr) {
+        lv_label_set_text_fmt(s_labelBtn, "测试按钮 按下 %lu 次",
+                              (unsigned long)s_btnClickCount);
+    }
+    Serial.printf("触摸: 测试按钮第 %lu 次按下 (屏幕 %u,%u | 原始 %u,%u)\n",
+                  (unsigned long)s_btnClickCount, (unsigned)s_touchX,
+                  (unsigned)s_touchY, (unsigned)s_touchRawX,
+                  (unsigned)s_touchRawY);
+}
+
+// 清零按钮：把计数归零，方便反复测
+static void onBtnResetClicked(lv_event_t *e) {
+    (void)e;
+    s_btnClickCount = 0;
+    s_touchPressCount = 0;
+    if (s_labelBtn != nullptr) {
+        lv_label_set_text(s_labelBtn, "测试按钮 按下 0 次");
+    }
+    Serial.println("触摸: 计数已清零");
+}
+#endif  // CFG_RUN_TOUCH
 
 // =============================================================================
 // 构造
@@ -270,6 +407,25 @@ bool DisplayLib::begin() {
     // 它同步跑在 setup 里，字库万一有问题会拖住启动，所以不默认开。
 #if CFG_FONT_SELFCHECK
     fontSelfCheck();
+#endif
+
+    // ---- 2.5) 触摸：独立 5 根线的 XPT2046 + 注册成 LVGL 输入设备 ----
+    // 这一步以前整个工程都没有，所以就算接好了线也没有任何反应。
+#if CFG_RUN_TOUCH
+    s_touch.begin(PIN_TOUCH_CS, PIN_TOUCH_IRQ, PIN_TOUCH_CLK, PIN_TOUCH_DIN,
+                  PIN_TOUCH_DO);
+    lv_indev_drv_init(&s_indevDrv);
+    s_indevDrv.type = LV_INDEV_TYPE_POINTER;
+    s_indevDrv.read_cb = touchReadCb;
+    s_indevDrv.scroll_limit = 40;   // 和参考工程一致：手指拖动超过 40px 才算滚动
+    lv_indev_drv_register(&s_indevDrv);
+    s_touch.printConfig();
+    Serial.printf("显示库: 触摸已注册为 LVGL 输入设备 (轮询 %dms), 输入 t 或翻页到第 5 页测按钮\n",
+                  CFG_TOUCH_READ_MS);
+#elif CFG_ENABLE_TOUCH
+    Serial.println("显示库: 触摸引脚没配全（config.h 第 3.2 节的 PIN_TOUCH_*）");
+#else
+    Serial.println("显示库: 触摸已在 config.h 里关掉 (CFG_ENABLE_TOUCH=0)");
 #endif
 
     // ---- 3) 界面 ----
@@ -439,6 +595,61 @@ void DisplayLib::createUi() {
     lv_obj_set_width(s_msgLabel, SCR_W - 32);
     lv_obj_center(s_msgLabel);
     lv_label_set_text(s_msgLabel, "");
+
+    // 触摸测试页的按钮面板（默认隐藏，翻到触摸页才显示）
+    createTouchUi();
+}
+
+// =============================================================================
+// 触摸测试页：一个能按的大按钮 + 一个清零按钮（放在正文下方，默认隐藏）
+// 面板在 footer 之后创建，所以它会盖住页脚提示，不用另外处理可见性。
+// =============================================================================
+void DisplayLib::createTouchUi() {
+    s_touchPanel = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(s_touchPanel, SCR_W - 16, 138);
+    lv_obj_align(s_touchPanel, LV_ALIGN_TOP_MID, 0, 172);
+    lv_obj_set_style_radius(s_touchPanel, 6, 0);
+    lv_obj_set_style_border_width(s_touchPanel, 1, 0);
+    lv_obj_set_style_border_color(s_touchPanel, lv_color_hex(0x90A0B0), 0);
+    lv_obj_set_style_pad_all(s_touchPanel, 6, 0);
+    lv_obj_set_style_bg_color(s_touchPanel, lv_color_hex(0xF0F4F8), 0);
+    lv_obj_set_style_bg_opa(s_touchPanel, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(s_touchPanel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(s_touchPanel, LV_OBJ_FLAG_HIDDEN);
+
+    // 大按钮：手指点得到就行，字用中文字库
+    s_btnTest = lv_btn_create(s_touchPanel);
+    lv_obj_set_size(s_btnTest, SCR_W - 44, 72);
+    lv_obj_align(s_btnTest, LV_ALIGN_TOP_MID, 0, 4);
+    lv_obj_set_style_bg_color(s_btnTest, lv_color_hex(0x0088FF), 0);
+    lv_obj_set_style_radius(s_btnTest, 8, 0);
+
+    s_labelBtn = lv_label_create(s_btnTest);
+    lv_obj_set_style_text_font(s_labelBtn, DISPLAY_FONT_CJK, 0);
+    lv_obj_set_style_text_color(s_labelBtn, lv_color_white(), 0);
+    lv_label_set_text(s_labelBtn, "测试按钮 按下 0 次");
+    lv_obj_center(s_labelBtn);
+
+#if CFG_RUN_TOUCH
+    lv_obj_add_event_cb(s_btnTest, onBtnTestClicked, LV_EVENT_CLICKED, nullptr);
+#endif
+
+    // 清零按钮
+    s_btnReset = lv_btn_create(s_touchPanel);
+    lv_obj_set_size(s_btnReset, 120, 38);
+    lv_obj_align(s_btnReset, LV_ALIGN_BOTTOM_MID, 0, -4);
+    lv_obj_set_style_bg_color(s_btnReset, lv_color_hex(0x607080), 0);
+    lv_obj_set_style_radius(s_btnReset, 6, 0);
+
+    lv_obj_t *labelReset = lv_label_create(s_btnReset);
+    lv_obj_set_style_text_font(labelReset, DISPLAY_FONT_CJK, 0);
+    lv_obj_set_style_text_color(labelReset, lv_color_white(), 0);
+    lv_label_set_text(labelReset, "计数清零");
+    lv_obj_center(labelReset);
+
+#if CFG_RUN_TOUCH
+    lv_obj_add_event_cb(s_btnReset, onBtnResetClicked, LV_EVENT_CLICKED, nullptr);
+#endif
 }
 
 // =============================================================================
@@ -597,6 +808,7 @@ void DisplayLib::printHelp() {
     Serial.println("  1 = 系统信息页(RAM/PSRAM/Flash/运行时间)");
     Serial.println("  2 = 已识别书列表页");
     Serial.println("  3 = 超声波测距页(距离/滤波/统计/测厚)");
+    Serial.println("  4 = 触摸测试页(按钮计数 + 坐标/原始值)，命令 t 直接跳过去");
 }
 
 const char *displayLibVersion() {
@@ -660,6 +872,12 @@ void DisplayLib::handleSelfTest() {
 
     if (req == 1) {
         runRawTest(_rawTestHoldMs);
+        return;
+    }
+
+    if (req == 3) {
+        // 触摸原始值采样（d,3）：不画屏，只记极值/打印
+        runTouchSample();
         return;
     }
 
@@ -754,6 +972,21 @@ void DisplayLib::printDiag() {
                   CFG_LV_PUSH_SWAP, LV_COLOR_16_SWAP);
     Serial.printf("  中文字库: %s\n",
                   CFG_FONT_CUSTOM_CJK ? "ui_font_16(自建全字库)" : "LVGL 自带 simsun(缺字)");
+#if CFG_RUN_TOUCH
+    Serial.printf("  触摸: T_CS=%d T_IRQ=%d T_CLK=%d T_DIN=%d T_DO=%d, 轮询 %dms\n",
+                  PIN_TOUCH_CS, PIN_TOUCH_IRQ, PIN_TOUCH_CLK, PIN_TOUCH_DIN,
+                  PIN_TOUCH_DO, CFG_TOUCH_READ_MS);
+    Serial.printf("        状态=%s 屏幕=%u,%u 原始=%u,%u\n",
+                  s_touchPressed ? "按下" : "松开", (unsigned)s_touchX,
+                  (unsigned)s_touchY, (unsigned)s_touchRawX,
+                  (unsigned)s_touchRawY);
+    Serial.printf("        按下 %lu 次, 测试按钮 %lu 次 | SWAP=%d INVERT_X=%d INVERT_Y=%d\n",
+                  (unsigned long)s_touchPressCount, (unsigned long)s_btnClickCount,
+                  CFG_TOUCH_SWAP_XY, CFG_TOUCH_INVERT_X, CFG_TOUCH_INVERT_Y);
+    Serial.println("        一直显示 0,0 或从不按下 -> 先查 5 根线,再用 d,3 采样原始值");
+#else
+    Serial.println("  触摸: 未启用（config.h 第 3.2 节的 CFG_ENABLE_TOUCH / PIN_TOUCH_*）");
+#endif
     Serial.printf("  排错模式: CFG_DISPLAY_BRINGUP=%d, 开机彩条=%dms\n",
                   CFG_DISPLAY_BRINGUP, CFG_TFT_SPLASH_MS);
     Serial.println("  判读: 刷屏次数一直是 0 -> LVGL 没在刷; 在涨但屏黑 -> 屏/背光/接线");
@@ -789,6 +1022,15 @@ static uint32_t computeSignature(const HuskyFrame &f, const SystemInfo &info,
 
     sig = (sig ^ wave.filteredMm) * 16777619UL;
     sig = (sig ^ (uint32_t)(wave.valid ? 1 : 0)) * 16777619UL;
+
+    // 触摸状态也进签名：按下/移动/计数变化时触摸页要跟着刷
+    sig = (sig ^ (uint32_t)(s_touchPressed ? 1 : 0)) * 16777619UL;
+    sig = (sig ^ (uint32_t)s_touchX) * 16777619UL;
+    sig = (sig ^ (uint32_t)s_touchY) * 16777619UL;
+    sig = (sig ^ (uint32_t)s_touchRawX) * 16777619UL;
+    sig = (sig ^ (uint32_t)s_touchRawY) * 16777619UL;
+    sig = (sig ^ s_btnClickCount) * 16777619UL;
+    sig = (sig ^ s_touchPressCount) * 16777619UL;
 
     sig = (sig ^ info.ramUsedKb) * 16777619UL;
     sig = (sig ^ info.psramUsedKb) * 16777619UL;
@@ -888,6 +1130,15 @@ void DisplayLib::update() {
              (unsigned)PAGE_COUNT);
     lv_label_set_text(s_labelPage, pageText);
 
+    // 触摸测试页才显示按钮面板，其它页藏起来（面板在页脚之后建，会盖住页脚）
+    if (s_touchPanel != nullptr) {
+        if (page == PAGE_TOUCH) {
+            lv_obj_clear_flag(s_touchPanel, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_add_flag(s_touchPanel, LV_OBJ_FLAG_HIDDEN);
+        }
+    }
+
     switch (page) {
         case PAGE_SYSINFO:
             showSysInfoPage(info);
@@ -897,6 +1148,9 @@ void DisplayLib::update() {
             break;
         case PAGE_BOOKS:
             showBooksPage(books, bookNum);
+            break;
+        case PAGE_TOUCH:
+            showTouchPage();
             break;
         case PAGE_STATUS:
         default:
@@ -1063,4 +1317,87 @@ void DisplayLib::showMessagePage(const char *text) {
     lv_label_set_text(s_msgLabel, text);
     lv_obj_clear_flag(s_msgPanel, LV_OBJ_FLAG_HIDDEN);
     lv_obj_move_foreground(s_msgPanel);
+}
+
+// =============================================================================
+// 触摸测试页正文：只显示“是否就绪 + 当前坐标/原始值”，按钮在下面的面板里
+// （正文控制在 5 行以内，免得和 y=172 开始的按钮面板叠在一起）
+// =============================================================================
+void DisplayLib::showTouchPage() {
+    char body[CFG_STATUS_TEXT_LEN];
+
+#if !CFG_ENABLE_TOUCH
+    snprintf(body, sizeof(body),
+             "触摸被 config.h 关掉了\n\n把 CFG_ENABLE_TOUCH 改成 1，\n"
+             "并按第 3.2 节接好四根线。");
+#elif !CFG_RUN_TOUCH
+    snprintf(body, sizeof(body),
+             "触摸引脚没配全\nCS=%d CLK=%d DIN=%d DO=%d\n"
+             "见 config.h 第 3.2 节",
+             PIN_TOUCH_CS, PIN_TOUCH_CLK, PIN_TOUCH_DIN, PIN_TOUCH_DO);
+#else
+    if (s_touchPressed) {
+        snprintf(body, sizeof(body),
+                 "触摸: 按下中\n屏幕: %u, %u\n原始: %u, %u\n\n"
+                 "按住拖动，看坐标跟不跟手",
+                 (unsigned)s_touchX, (unsigned)s_touchY,
+                 (unsigned)s_touchRawX, (unsigned)s_touchRawY);
+    } else {
+        snprintf(body, sizeof(body),
+                 "触摸: 松开\n屏幕: %u, %u   原始: %u, %u\n"
+                 "按下 %lu 次   按钮点击 %lu 次\n\n"
+                 "没反应: d,2 看诊断 / d,3 采样原始值",
+                 (unsigned)s_touchX, (unsigned)s_touchY,
+                 (unsigned)s_touchRawX, (unsigned)s_touchRawY,
+                 (unsigned long)s_touchPressCount,
+                 (unsigned long)s_btnClickCount);
+    }
+#endif
+
+    lv_label_set_text(s_labelBody, body);
+    lv_obj_add_flag(s_barValue, LV_OBJ_FLAG_HIDDEN);
+}
+
+// =============================================================================
+// 触摸原始值采样（串口命令 d,3）
+// 第一次调用开始记极值，第二次调用打印结果 + 轴方向建议。
+// 用途：确认四角都能读到、轴方向对不对，不用反复改代码烧录试。
+// =============================================================================
+void DisplayLib::requestTouchSample() {
+    _testRequest = 3;
+}
+
+void DisplayLib::runTouchSample() {
+#if !CFG_RUN_TOUCH
+    Serial.println("触摸采样: 触摸没启用（看 config.h 第 3.2 节的 CFG_ENABLE_TOUCH 和引脚）");
+#else
+    if (!s_touchSampling) {
+        s_touchSampling = true;
+        s_rawMinX = 0xFFFF;
+        s_rawMaxX = 0;
+        s_rawMinY = 0xFFFF;
+        s_rawMaxY = 0;
+        Serial.println("触摸采样: 开始。请沿屏幕四个角各按一下（越靠边越好），再敲一次 d,3 看结果");
+        return;
+    }
+
+    s_touchSampling = false;
+    if (s_rawMaxX == 0 && s_rawMaxY == 0) {
+        Serial.println("触摸采样: 一个触点都没采到 —— 先查 T_CS=38 / T_CLK=40 / T_DIN=41 / T_DO=42 接线");
+        return;
+    }
+
+    Serial.printf("触摸采样结果: X %u~%u   Y %u~%u\n", (unsigned)s_rawMinX,
+                  (unsigned)s_rawMaxX, (unsigned)s_rawMinY,
+                  (unsigned)s_rawMaxY);
+    Serial.printf("  当前方向: SWAP_XY=%d INVERT_X=%d INVERT_Y=%d\n",
+                  CFG_TOUCH_SWAP_XY, CFG_TOUCH_INVERT_X, CFG_TOUCH_INVERT_Y);
+
+    if ((uint32_t)(s_rawMaxX - s_rawMinX) < 500 ||
+        (uint32_t)(s_rawMaxY - s_rawMinY) < 500) {
+        Serial.println("  ⚠️ 有轴的范围太小：可能那一轴接错脚，或手指没压到边");
+    }
+    Serial.println("  判读: 手指横向移动时要是 Y 变化大而 X 几乎不变 -> CFG_TOUCH_SWAP_XY 改 1");
+    Serial.println("        左右反了改 CFG_TOUCH_INVERT_X；上下反了改 CFG_TOUCH_INVERT_Y");
+#endif
 }
