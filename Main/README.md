@@ -28,6 +28,8 @@ Main/
 │  ├─ SysInfoLib/            ← RAM/PSRAM/Flash/运行时间采集与格式化
 │  ├─ ButtonLib/             ← 按键消抖 + 事件队列
 │  ├─ SerialCmdLib/          ← 串口命令行解析 + 注册式分派
+│  ├─ StepperLib/            ← 28BYJ-48 + ULN2003 步进驱动（宏可切 42 步进）
+│  ├─ UltraLib/              ← HC-SR04 超声波测距（非阻塞状态机）
 │  └─ DFRobot_HuskylensV2/   ← 二哈底层驱动（vendor，离线可编译）
 ├─ src/main.cpp              ← 只做拼装：全局对象 / 命令注册 / 任务
 ├─ platformio.ini            ← N16R8 + TFT_eSPI(USER_SETUP) + LVGL 依赖（业务配置在 config.h）
@@ -95,7 +97,7 @@ display.showMessage("开机自检完成", 2000);  // 整屏消息，2 秒后自�
 display.setPage(PAGE_STATUS); display.nextPage();
 ```
 
-三页：`PAGE_STATUS`(0) / `PAGE_SYSINFO`(1) / `PAGE_BOOKS`(2)。
+四页：`PAGE_STATUS`(0) / `PAGE_SYSINFO`(1) / `PAGE_BOOKS`(2) / `PAGE_WAVE`(3)。
 刷新策略：**脏标志 + 内容签名**，内容没变就不动控件（不闪屏、省 CPU）。
 所有 `lv_*` 调用都只在库内 `displayTask` 里做，最后由刷屏回调把画好的区域推给 TFT_eSPI；
 **LVGL 不是线程安全的**，外部只能写数据。
@@ -170,12 +172,16 @@ cli.sendCommand("algo,4");                    // 其它任务也可投递命令
 | `displayTask` | DisplayLib | 0 | 每 5ms 一轮：取快照 → 内容变了才更新控件 → `lv_timer_handler()` |
 | `buttonTask` | ButtonLib | 0 | 5ms 扫描消抖，事件进队列 |
 | `serialCmdTask` | SerialCmdLib | 0 | 轮询串口 + 执行命令队列 |
+| `stepperTask` | main.cpp | 1 | **唯一**碰电机引脚：消费 MotorQueue，推进三台电机的走步状态机 |
+| `waveTask` | main.cpp | 0 | **唯一**碰 TRIG/ECHO：发起测量、推进状态机、滤波、写 WaveState |
 
 ```
 recogTask   --HuskyFrame-->  DisplayLib.setFrame()      (库内加锁)
 monitorTask --SystemInfo-->  DisplayLib.setSystemInfo() + infoMutex 共享
 buttonTask  --按钮事件队列--> loop() 翻译成命令 --> SerialCmdLib
 serialCmdTask --命令队列-->  各命令回调
+cmdMotor/m  --MotorQueue-->  stepperTask --service()-->  motor1/2/3
+waveTask    --WaveState(waveMutex 保护)-->  DisplayLib.setWave() + 串口
 ```
 
 `loop()` 里只有按键事件转发 + 20ms 延时，不写业务。
@@ -200,8 +206,13 @@ serialCmdTask --命令队列-->  各命令回调
 | `p` | 读算法参数（排查 OCR 读出空内容） |
 | `b` | 跳到书列表页并打印数量 |
 | `c` | 清空书列表记录 |
+| `m` / `m,1,300` | 步进电机：`m` 看用法，`m,?` 看状态，`m,1,300` 电机1走300步，`m,s1500` 改速度 |
+| `z` / `z,2` | 步进急停：`z` 全停，`z,2` 只停电机2 |
+| `w` / `w,s` / `w,e` / `w,c` | 超声波：`w` 看状态，`w,s` 记测厚起点，`w,e` 算厚度，`w,c` 清统计 |
 
-按键（可选）：按键1 = 下一页，按键2 = 重新连接，按键3 = 学习当前目标。
+按键（可选）：按键1 = 下一页，按键2 = 重新连接，按键3 = 学习当前目标；A 键 = 记测厚起点（w,s），B 键 = 算书本厚度（w,e）。
+（说明书里的 A/B 是取书/还书；机械没接之前先借 A/B 做测厚，接上机械后把 sendCommand 换成取还书流程即可。）
+A/B 的引脚在 `config.h` 的 `BUTTON_PIN4`/`BUTTON_PIN5`，默认 -1（不接）。
 
 ---
 
@@ -211,7 +222,8 @@ serialCmdTask --命令队列-->  各命令回调
 | --- | --- | --- |
 | ILI9341 | SCLK=12 MOSI=11 CS=10 DC=9 RST=8 BL=47 | TFT_eSPI 参数在 `platformio.ini` |
 | 二哈 HUSKYLENS 2 | SDA=1 SCL=2 | I2C 地址 0x50，超时 1000ms |
-| 按键 | 45 / 46 / 0 | 按下高电平，可选（**已从 40/41/42 挪走**） |
+| 按键 1/2/3 | 45 / 46 / 0 | 按下高电平，可选（**已从 40/41/42 挪走**） |
+| 按键 A/B（说明书取书/还书） | -1（未接线） | `BUTTON_PIN4`/`BUTTON_PIN5`，接上后可用作取书/还书 |
 | 步进电机1（推出小车） | 4, 5, 6, 7 | ULN2003 的 IN1~IN4；与 HC-SR04 冲突 |
 | 步进电机2（中间夹层） | 15, 16, 17, 18 | ULN2003 的 IN1~IN4 |
 | 步进电机3（升降平台） | 38, 39, 48, 21 | 机械到位后再接（默认关） |
@@ -287,4 +299,56 @@ SCCB SDA（也是 GPIO1）冲突。要“本地摄像头 + 二哈”同时用，
    不想用 BOOT 脚就改成 `-DBUTTON_PIN3=48`（或 21/38/39，注意别和电机3 冲突）；
    GPIO0 在 DevKitC 上有外部上拉，也可以改成按下低电平 `-DBUTTON_TRUE_VALUE=0`。
 2. **HC-SR04 的 TRIG=4/ECHO=5 与步进电机1 的 4/5/6/7 冲突**。
-   两个外设不能同时接；两个任务眼下都还没建（下一步做步进时会按开关挑一个）。
+   两个外设不能同时接。代码里已经会检测到并打印警告；
+   要用测距就把 `CFG_ENABLE_STEPPER` 置 0，要用电机就把 ECHO 挪到空闲脚
+   （如 `-DPIN_WAVE_TRIG=39 -DPIN_WAVE_ECHO=48`）。
+
+---
+
+## 8. 步进（StepperLib）与测距（UltraLib）
+
+### 8.1 StepperLib —— 28BYJ-48 + ULN2003（宏可切 42 步进）
+
+- 非阻塞：`run()` 只登记目标，真正的脉冲在 `service()` 里按时间线发，
+  由 `stepperTask` 每 `STEPPER_SERVICE_INTERVAL_MS`（默认 2ms）调一次。
+  写固件时**不要** `while (busy());`，那会把整核占满。
+- 一次只动一台：`runMotor()` 会先把其它两台停掉，避免三台同时走步抢电流。
+- 软限位：`_posSteps` 是相对上电位置的步数（没有限位开关，上电即零点）。
+  撞到 `xxx_RANGE_STEPS` 会立刻停并丢弃剩余步数，不硬顶机构。
+- 停机自动断电：走完或 `stop()` 都会 `release()` 把四相拉低——
+  28BYJ 停机不断电会一直发热，这是必须的。
+- 保护：`CFG_STEPPER_MAX_STEPS` 之外的单次步数直接拒绝（防止参数多写一个 0）。
+- 换 42 步进：`CFG_STEPPER_DRIVER=1`，此时每台只用 3 个脚
+  （`pins[0]=STEP` `pins[1]=DIR` `pins[2]=EN`），细分/导程见 `CFG_STEPPER42_xxx`。
+
+> ⚠️ **供电**：28BYJ-48 每相约 200mA、ULN2003 同时两相通电，峰值可到 300mA 以上。
+> 不要从 ESP32-S3 的 3V3 取电，也不要和 USB 口共用一根细线；
+> 用独立 5V 并**与主控共地**，否则会出现“一走电机就复位/串口掉线”。
+
+### 8.2 UltraLib —— HC-SR04（非阻塞状态机）
+
+- 从 `Wave_Test` 的 `HCSR04` 移植过来，接口没变，只把参数改走 `config.h`，
+  并修掉 `startMeasure()` 里 `_ready` 没清零的问题。
+- 全程不用 `pulseIn()`：TRIG 拉高 10us，然后状态机等 ECHO 上升沿/下降沿，
+  每个等待阶段都有超时，模块没接也不会把任务卡死。
+- 错误码：`1` = ECHO 一直没拉高（查 TRIG / 模块 5V），
+  `2` = ECHO 一直没拉低（查分压 / 是否超量程）。
+- 量程过滤 `CFG_WAVE_MIN_MM`~`CFG_WAVE_MAX_MM` + 滑动平均 `CFG_WAVE_FILTER_N`。
+- 测书厚：`w,s` 记起点、`w,e` 算厚度（起点距离 - 当前距离），
+  也可以用 A/B 两个按键。厚度判定阈值在 `CFG_THICK_TOLERANCE_MM`。
+
+> ⚠️ **ECHO 是 5V 输出，必须分压（1k + 2k）后再接 GPIO**，否则可能损坏 S3。
+> ⚠️ 超时按最远 4000mm 留了余量：往返约 23.3ms，`CFG_WAVE_TIMEOUT_US=38000`。
+
+### 8.3 本步验证方式
+
+本机没有 x86 编译器，所以纯逻辑用等价的 Python 仿真验证（脚本可复现）：
+
+```powershell
+python tools\stepper_sim.py    # 33 项：拍序/方向/步数/位置/软限位/参数校验/命令解析
+python tools\wave_sim.py       # 16 项：换算精度/量程边界/超时余量/状态机三种结局
+```
+
+另外 `Main/test/stepper_host_test/` 里有一份 C++ 版单元测试（带 Arduino 桩），
+在装了 g++ 的机器上可以直接编译运行；本机已用 xtensa 的 g++ 做过
+`-Wall -Wextra -fsyntax-only` 语法检查。

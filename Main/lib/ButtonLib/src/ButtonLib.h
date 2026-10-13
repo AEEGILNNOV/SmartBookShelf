@@ -26,9 +26,13 @@
 #define BUTTON1_OPENFLAG 0x01   // 按键 1 按下
 #define BUTTON2_OPENFLAG 0x02   // 按键 2 按下
 #define BUTTON3_OPENFLAG 0x03   // 按键 3 按下
-#define BUTTON1_CLOSEFLAG 0x04  // 按键 1 松开
-#define BUTTON2_CLOSEFLAG 0x05  // 按键 2 松开
-#define BUTTON3_CLOSEFLAG 0x06  // 按键 3 松开
+#define BUTTON4_OPENFLAG 0x04   // 按键 4(说明书 A 键) 按下
+#define BUTTON5_OPENFLAG 0x05   // 按键 5(说明书 B 键) 按下
+#define BUTTON1_CLOSEFLAG 0x06  // 按键 1 松开
+#define BUTTON2_CLOSEFLAG 0x07  // 按键 2 松开
+#define BUTTON3_CLOSEFLAG 0x08  // 按键 3 松开
+#define BUTTON4_CLOSEFLAG 0x09  // 按键 4 松开
+#define BUTTON5_CLOSEFLAG 0x0A  // 按键 5 松开
 
 // 按键事件
 struct ButtonEvent {
@@ -40,9 +44,14 @@ struct ButtonEvent {
 
 class ButtonLib {
 public:
-    // pin1~pin3 = -1 表示不接这个键
+    // 引脚传 -1 表示不接这个键（默认用 config.h 里的 5 个引脚）
+    // pin3 = 功能键3, pin4 = A 键, pin5 = B 键
     ButtonLib(int pin1 = BUTTON_PIN1, int pin2 = BUTTON_PIN2,
-              int pin3 = BUTTON_PIN3);
+              int pin3 = BUTTON_PIN3, int pin4 = BUTTON_PIN4,
+              int pin5 = BUTTON_PIN5);
+
+    // 一共几个键（供打印用）
+    static const uint8_t COUNT = 5;
 
     // 配引脚 + 建事件队列（长度 BUTTON_QUEUE_SIZE）
     bool begin();
@@ -60,9 +69,9 @@ public:
     bool anyPressed() const;
 
 private:
-    int _pins[3];
-    uint8_t _history[3];      // 移位历史
-    uint8_t _lastFlag[3];     // 上一次发出去的状态（防止重复发）
+    int _pins[COUNT];
+    uint8_t _history[COUNT];  // 移位历史
+    uint8_t _lastFlag[COUNT]; // 上一次发出去的状态（防止重复发）
     QueueHandle_t _queue;
     bool _activeHigh;
 

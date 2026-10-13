@@ -1,0 +1,15 @@
+{
+    "name": "ultralib",
+    "version": "1.0.0",
+    "description": "SmartBookShelf HC-SR04 超声波测距库：非阻塞状态机，不用 pulseIn，带超时与错误码；测书厚用的时间窗快照结构在其中。",
+    "keywords": "hc-sr04, ultrasonic, esp32, freertos, non-blocking",
+    "authors": [
+        {
+            "name": "SmartBookShelf",
+            "maintainer": true
+        }
+    ],
+    "license": "MIT",
+    "frameworks": "arduino",
+    "platforms": "espressif32"
+}

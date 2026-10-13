@@ -8,6 +8,7 @@
 #include "BoardConfig.h"
 #include "HuskyLib.h"
 #include "SysInfoLib.h"
+#include "UltraLib.h"
 
 // =============================================================================
 // DisplayLib —— 显示库（2.8" SPI ILI9341 240x320 竖屏 + LVGL 8.4 中文界面）
@@ -32,7 +33,8 @@
 #define PAGE_STATUS  0x00   // 状态页：连接/算法/识别块/已记书数
 #define PAGE_SYSINFO 0x01   // 系统信息页：RAM/PSRAM/Flash/运行时间
 #define PAGE_BOOKS   0x02   // 已识别书列表页
-#define PAGE_COUNT   3
+#define PAGE_WAVE    0x03   // 超声波测距页（HC-SR04）
+#define PAGE_COUNT   4
 
 // 屏幕分辨率：从 TFT_eSPI 的宏推导（本头文件已在上面 include 过 <TFT_eSPI.h>）。
 // 业务代码算坐标一律用 SCR_W/SCR_H，不要写死 240/320。
@@ -61,6 +63,7 @@ public:
     // ---- 外部任务写数据（内部加锁，只写数据不画屏）----
     void setFrame(const HuskyFrame &frame);
     void setSystemInfo(const SystemInfo &info);
+    void setWave(const WaveState &wave);      // 超声波测距快照
     void countBook(const HuskyWord &word);   // 累计一本识别到的书
     void clearBooks();
     int16_t bookCount() const;
@@ -89,6 +92,7 @@ private:
     // 三个页面 + 消息页：都只吃快照数据，不读成员变量
     void showStatusPage(const HuskyFrame &f, int16_t bookNum);
     void showSysInfoPage(const SystemInfo &info);
+    void showWavePage(const WaveState &wave);
     void showBooksPage(const BookRecord *books, int16_t bookNum);
     void showMessagePage(const char *text);
 
@@ -97,6 +101,7 @@ private:
 
     HuskyFrame _frame;
     SystemInfo _info;
+    WaveState _wave;
     BookRecord _books[MAX_BOOK_RECORDS];
     int16_t _bookNum;
 

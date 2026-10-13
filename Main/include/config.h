@@ -214,7 +214,7 @@
 
 // 页脚操作提示。改按键定义时同步改这一行（LVGL 只认 ASCII 才会用 montserrat_12）
 #ifndef CFG_FOOTER_HINT
-#define CFG_FOOTER_HINT "key1 next  key2 reconnect  key3 learn"
+#define CFG_FOOTER_HINT "k1 next k2 recon k3 learn kA mark kB thick"
 #endif
 
 // 最多显示（或参与签名比较）几条识别块
@@ -319,6 +319,16 @@
 #endif
 #ifndef BUTTON_PIN3
 #define BUTTON_PIN3 0
+#endif
+
+// 按键 4 / 5 = 说明书里的 A/B 取书还书键（补齐主控要的 5 个键）。
+// 暂时没接就置 -1，ButtonLib 会跳过这个键。
+// ⚠️ 去掉按键库“只认 3 个键”的限制，是因为产品实际交互是 A/B 两个键 + 3 个功能键。
+#ifndef BUTTON_PIN4
+#define BUTTON_PIN4 -1
+#endif
+#ifndef BUTTON_PIN5
+#define BUTTON_PIN5 -1
 #endif
 
 // 按下时的电平：1 = 按下高电平（内部下拉）  0 = 按下低电平（内部上拉）

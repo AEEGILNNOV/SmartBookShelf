@@ -82,6 +82,7 @@ static void displayFlushCb(lv_disp_drv_t *drv, const lv_area_t *area,
 DisplayLib::DisplayLib() {
     memset(&_frame, 0, sizeof(_frame));
     memset(&_info, 0, sizeof(_info));
+    memset(&_wave, 0, sizeof(_wave));
     memset(_books, 0, sizeof(_books));
     _bookNum = 0;
 
@@ -263,6 +264,18 @@ void DisplayLib::setSystemInfo(const SystemInfo &info) {
     }
 }
 
+// 超声波快照：和别的页一样，只写数据不画屏
+void DisplayLib::setWave(const WaveState &wave) {
+    if (_mutex == nullptr) {
+        return;
+    }
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        _wave = wave;
+        _dirty = true;
+        xSemaphoreGive(_mutex);
+    }
+}
+
 // 累计一本：先按 ID 找（ID 非 0 时），再按文字内容找，都没有就新增一条
 void DisplayLib::countBook(const HuskyWord &word) {
     if (_mutex == nullptr) {
@@ -376,6 +389,7 @@ void DisplayLib::printHelp() {
     Serial.println("  0 = 状态页(二哈连接/算法/识别块/已记录书数)");
     Serial.println("  1 = 系统信息页(RAM/PSRAM/Flash/运行时间)");
     Serial.println("  2 = 已识别书列表页");
+    Serial.println("  3 = 超声波测距页(距离/滤波/统计/测厚)");
 }
 
 const char *displayLibVersion() {
@@ -397,6 +411,7 @@ void DisplayLib::taskLoop() {
 // 内容签名：只取页面上真的会显示的值，内容没变就不动控件
 // =============================================================================
 static uint32_t computeSignature(const HuskyFrame &f, const SystemInfo &info,
+                                 const WaveState &wave,
                                  const BookRecord *books, int16_t bookNum,
                                  uint8_t page) {
     uint32_t sig = 2166136261UL;
@@ -418,6 +433,9 @@ static uint32_t computeSignature(const HuskyFrame &f, const SystemInfo &info,
             sig = (sig ^ (uint8_t)t[c]) * 16777619UL;
         }
     }
+
+    sig = (sig ^ wave.filteredMm) * 16777619UL;
+    sig = (sig ^ (uint32_t)(wave.valid ? 1 : 0)) * 16777619UL;
 
     sig = (sig ^ info.ramUsedKb) * 16777619UL;
     sig = (sig ^ info.psramUsedKb) * 16777619UL;
@@ -445,6 +463,7 @@ void DisplayLib::update() {
     // ---- 1) 加锁取快照，马上放锁 ----
     HuskyFrame frame;
     SystemInfo info;
+    WaveState wave;
     BookRecord books[MAX_BOOK_RECORDS];
     int16_t bookNum = 0;
     uint8_t page = PAGE_STATUS;
@@ -454,6 +473,7 @@ void DisplayLib::update() {
 
     memset(&frame, 0, sizeof(frame));
     memset(&info, 0, sizeof(info));
+    memset(&wave, 0, sizeof(wave));
     memset(books, 0, sizeof(books));
     memset(message, 0, sizeof(message));
 
@@ -462,6 +482,7 @@ void DisplayLib::update() {
     }
     frame = _frame;
     info = _info;
+    wave = _wave;
     memcpy(books, _books, sizeof(books));
     bookNum = _bookNum;
     page = _page;
@@ -494,7 +515,7 @@ void DisplayLib::update() {
     }
 
     // ---- 4) 正常页：内容变了才更新控件 ----
-    uint32_t sig = computeSignature(frame, info, books, bookNum, page);
+    uint32_t sig = computeSignature(frame, info, wave, books, bookNum, page);
     if (_sigValid && !_dirty && sig == _lastSig) {
         return;
     }
@@ -511,6 +532,9 @@ void DisplayLib::update() {
     switch (page) {
         case PAGE_SYSINFO:
             showSysInfoPage(info);
+            break;
+        case PAGE_WAVE:
+            showWavePage(wave);
             break;
         case PAGE_BOOKS:
             showBooksPage(books, bookNum);
@@ -619,6 +643,58 @@ void DisplayLib::showBooksPage(const BookRecord *books, int16_t bookNum) {
         off += snprintf(body + off, sizeof(body) - (size_t)off, "%d. %s x%u\n",
                         (int)(i + 1), t, (unsigned)books[i].count);
     }
+
+    lv_label_set_text(s_labelBody, body);
+    lv_obj_add_flag(s_barValue, LV_OBJ_FLAG_HIDDEN);
+}
+
+// 超声波测距页：距离(mm/cm) + 滤波值 + 统计 + 测厚信息
+void DisplayLib::showWavePage(const WaveState &wave) {
+    char body[CFG_STATUS_TEXT_LEN];
+    char lineDist[48];
+    char lineState[48];
+
+    if (!wave.valid && wave.distanceMm == 0) {
+        snprintf(lineDist, sizeof(lineDist), "等待测距...");
+    } else {
+        snprintf(lineDist, sizeof(lineDist), "%u mm  (%u.%u cm)",
+                 (unsigned)wave.distanceMm, (unsigned)(wave.distanceMm / 10U),
+                 (unsigned)(wave.distanceMm % 10U));
+    }
+
+    if (wave.errorCode == 1) {
+        snprintf(lineState, sizeof(lineState), "超时: ECHO 没拉高(查TRIG/5V)");
+    } else if (wave.errorCode == 2) {
+        snprintf(lineState, sizeof(lineState), "超时: ECHO 没拉低(查分压)");
+    } else if (!wave.valid) {
+        snprintf(lineState, sizeof(lineState), "无效读数(超量程或无目标)");
+    } else {
+        snprintf(lineState, sizeof(lineState), "读数正常");
+    }
+
+    int off = 0;
+    off += snprintf(body + off, sizeof(body) - (size_t)off,
+                    "距离: %s\n"
+                    "状态: %s\n"
+                    "滤波: %u mm\n",
+                    lineDist, lineState, (unsigned)wave.filteredMm);
+
+    // 测厚：B 键记起点，A 键算厚度
+    if (wave.asnapValid) {
+        off += snprintf(body + off, sizeof(body) - (size_t)off,
+                        "\n起点: %u mm (%.1f 秒前)\n",
+                        (unsigned)wave.asnapMm,
+                        (double)((millis() - wave.asnapMs) / 1000.0));
+    }
+    if (wave.thicknessValid) {
+        off += snprintf(body + off, sizeof(body) - (size_t)off,
+                        "厚度: %d mm\n", (int)wave.thicknessMm);
+    }
+
+    snprintf(body + off, sizeof(body) - (size_t)off,
+             "\n统计: 共%u 无效%u\n范围: %u~%u mm",
+             (unsigned)wave.totalCount, (unsigned)wave.invalidCount,
+             (unsigned)wave.minMm, (unsigned)wave.maxMm);
 
     lv_label_set_text(s_labelBody, body);
     lv_obj_add_flag(s_barValue, LV_OBJ_FLAG_HIDDEN);

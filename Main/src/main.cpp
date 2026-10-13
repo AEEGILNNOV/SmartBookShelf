@@ -7,6 +7,7 @@
 #include "SerialCmdLib.h"
 #include "StepperLib.h"
 #include "SysInfoLib.h"
+#include "UltraLib.h"
 
 // 全工程唯一配置来源（引脚/任务节奏/开关都在这里）
 #include "config.h"
@@ -22,6 +23,7 @@
 //   ButtonLib     按键消抖 + 事件队列（自带 buttonTask）
 //   SerialCmdLib  串口命令行解析 + 分派（自带 serialCmdTask）
 //   StepperLib    28BYJ-48/ULN2003 步进驱动（宏可切 42 步进），非阻塞走步 + 软限位
+//   UltraLib      HC-SR04 超声波测距（非阻塞状态机，带超时/错误码）
 //
 // 任务与队列流向：
 //   recogTask(核心1)   --HuskyFrame--> DisplayLib.setFrame()  （显示库内部加锁）
@@ -29,6 +31,7 @@
 //   buttonTask(库内)   --ButtonQueue--> loop() 翻译成串口命令
 //   serialCmdTask(库内) --CmdQueue--> 各命令回调
 //   cmdMotor/c  --MotorQueue--> stepperTask(核心1) --service()--> motor1/2/3
+//   waveTask(核心0) --WaveState(waveMutex 保护)--> DisplayLib.setWave() + 串口
 //   loop() 只做按键事件转发和短延时，不写业务
 // =============================================================================
 
@@ -72,6 +75,17 @@ static Stepper28BYJ *getMotor(int index) {
 // 步进命令队列：串口/按键投递，stepperTask 消费（单一消费者，不用锁）
 static QueueHandle_t MotorQueue = nullptr;
 
+// ---- 超声波测距（HC-SR04）----
+// ⚠️ 引脚与步进电机1 的 4/5/6/7 冲突，两者不要同时接（见 config.h 第 8 节）。
+// 只有 waveTask 碰这个对象，别的任务读 waveMutex 保护的快照。
+static HCSR04 waveSensor(PIN_WAVE_TRIG, PIN_WAVE_ECHO, CFG_WAVE_TIMEOUT_US);
+static WaveState waveState = {};
+static SemaphoreHandle_t waveMutex = nullptr;
+
+// 滤波窗口：最近 CFG_WAVE_FILTER_N 次有效读数，取平均后清零重来
+static uint32_t waveFilterBuf[CFG_WAVE_FILTER_N > 0 ? CFG_WAVE_FILTER_N : 1] = {};
+static uint8_t waveFilterCount = 0;
+
 // 电机名字，打印用；下标 0~2 对应 motor1~motor3
 static const char *MOTOR_NAME[3] = { "M1推出", "M2夹层", "M3升降" };
 
@@ -113,6 +127,9 @@ static char *parseMotorCmd(char *line, int *outIndex);
 static void runMotor(int index, int32_t steps);
 static void printStepperState();
 static void stepperTask(void *pvParameters);
+static void waveTask(void *pvParameters);
+static void cmdWave(const char *arg);
+static void printWaveState();
 
 // -----------------------------------------------------------------------------
 // 工具
@@ -147,9 +164,20 @@ static void printBanner() {
                   "DC=%d RST=%d BL=%d\n",
                   PIN_HUSKY_SDA, PIN_HUSKY_SCL, PIN_TFT_MOSI, PIN_TFT_SCLK,
                   PIN_TFT_CS, PIN_TFT_DC, PIN_TFT_RST, PIN_TFT_BL);
-    Serial.printf("按键: BTN1=%d BTN2=%d BTN3=%d (按下为%s电平, 可选)\n",
-                  BUTTON_PIN1, BUTTON_PIN2, BUTTON_PIN3,
-                  (BUTTON_TRUE_VALUE != 0) ? "高" : "低");
+    Serial.printf("按键: BTN1=%d BTN2=%d BTN3=%d A键=%d B键=%d (按下为%s电平)\n",
+                  BUTTON_PIN1, BUTTON_PIN2, BUTTON_PIN3, BUTTON_PIN4,
+                  BUTTON_PIN5, (BUTTON_TRUE_VALUE != 0) ? "高" : "低");
+    // 步进引脚是“宏展开成 {...} 初始化列表”，不能直接塞进 printf 的变参，
+    // 所以先落成 static 数组（static 保证在 setup 之前就完成初始化）再逐个数。
+    static const uint8_t m1pins[4] = CFG_STEPPER_M1_PINS;
+    static const uint8_t m2pins[4] = CFG_STEPPER_M2_PINS;
+    static const uint8_t m3pins[4] = CFG_STEPPER_M3_PINS;
+    Serial.printf("测距: TRIG=%d ECHO=%d (ECHO 必须分压, 与M1冲突)\n",
+                  PIN_WAVE_TRIG, PIN_WAVE_ECHO);
+    Serial.printf("步进: M1=%d,%d,%d,%d M2=%d,%d,%d,%d M3=%d,%d,%d,%d\n",
+                  m1pins[0], m1pins[1], m1pins[2], m1pins[3], m2pins[0],
+                  m2pins[1], m2pins[2], m2pins[3], m3pins[0], m3pins[1],
+                  m3pins[2], m3pins[3]);
     Serial.println("二哈屏幕: 系统设置 -> 协议类型 -> I2C");
 }
 
@@ -165,6 +193,7 @@ static void printStatus() {
     sysInfoPrint(snap);
     Serial.printf("已记录书数: %d\n", (int)display.bookCount());
     printStepperState();
+    printWaveState();
 }
 
 // -----------------------------------------------------------------------------
@@ -483,6 +512,8 @@ static void registerCommands() {
     cli.registerCommand('c', "清空书列表记录", cmdClearBooks);
     cli.registerCommand('m', "步进电机(手动调试): m 看用法, m,1,300 / m,z", cmdMotor);
     cli.registerCommand('z', "步进急停: z 全停, z,2 停电机2", cmdStopMotor);
+    cli.registerCommand('w', "超声波测距: w 看状态, w,s 记起点, w,e 算厚度, w,c 清统计",
+                        cmdWave);
 }
 
 // -----------------------------------------------------------------------------
@@ -509,6 +540,17 @@ static void handleButtonEvent(const ButtonEvent &event) {
         case 3:
             cli.sendCommand("l");
             Serial.println("按键3: 学习当前目标");
+            break;
+        // 说明书里的 A/B 两个键：A 取书、B 还书。
+        // 现在机械还没接，先把它们接到测距的“记起点 / 算厚度”上，
+        // 等 stepperTask 能整套动作时，把 sendCommand 换成取书/还书流程即可。
+        case 4:
+            cli.sendCommand("w,s");
+            Serial.println("按键A: 记测厚起点");
+            break;
+        case 5:
+            cli.sendCommand("w,e");
+            Serial.println("按键B: 算书本厚度");
             break;
         default:
             break;
@@ -586,6 +628,237 @@ static void recogTask(void *pvParameters) {
 }
 
 // =============================================================================
+// 超声波测距任务（HC-SR04）：唯一接触 TRIG/ECHO 的任务
+//
+// 非阻塞流程：
+//   1) 每 WAVE_MEASURE_INTERVAL_MS 发起一次测量（手册建议间隔 >60ms）；
+//   2) 每 1ms 推进一次状态机（update 里从不死等）；
+//   3) 出结果后做量程过滤 + 滑动平均，写进 waveState（waveMutex 保护）。
+// =============================================================================
+static void waveTask(void *pvParameters) {
+    Serial.printf("测距任务: TRIG=GPIO%d ECHO=GPIO%d 超时=%luus\n",
+                  PIN_WAVE_TRIG, PIN_WAVE_ECHO,
+                  (unsigned long)CFG_WAVE_TIMEOUT_US);
+
+    uint32_t lastMeasure = 0;
+    uint32_t lastInvalid = 0;
+
+    for (;;) {
+        uint32_t now = millis();
+
+        // ---- 1) 到点就发起一次测量 ----
+        if (now - lastMeasure >= WAVE_MEASURE_INTERVAL_MS) {
+            if (waveSensor.startMeasure()) {
+                lastMeasure = now;
+            }
+        }
+
+        // ---- 2) 推进状态机 ----
+        waveSensor.update();
+
+        // ---- 3) 有结果就处理 ----
+        if (waveSensor.isReady()) {
+            uint32_t mm = waveSensor.getDistanceMm();
+            uint8_t err = waveSensor.getErrorCode();
+            bool valid = waveSensor.isValid();
+
+            // 超出量程的也当无效：HC-SR04 手册范围 20~4000mm
+            if (valid && (mm < CFG_WAVE_MIN_MM || mm > CFG_WAVE_MAX_MM)) {
+                valid = false;
+            }
+
+            uint32_t filtered = 0;
+            if (valid) {
+                // 滑动平均：攒够 CFG_WAVE_FILTER_N 个就取平均，然后重新攒
+#if CFG_WAVE_FILTER_N > 1
+                if (waveFilterCount < CFG_WAVE_FILTER_N) {
+                    waveFilterBuf[waveFilterCount++] = mm;
+                }
+                uint64_t sum = 0;
+                for (uint8_t i = 0; i < waveFilterCount; i++) {
+                    sum += waveFilterBuf[i];
+                }
+                filtered = (uint32_t)(sum / (waveFilterCount ? waveFilterCount : 1));
+                if (waveFilterCount >= CFG_WAVE_FILTER_N) {
+                    waveFilterCount = 0;
+                }
+#else
+                filtered = mm;
+#endif
+            }
+
+            if (waveMutex != nullptr &&
+                xSemaphoreTake(waveMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                waveState.distanceMm = mm;
+                waveState.pulseUs = waveSensor.getPulseUs();
+                waveState.errorCode = err;
+                waveState.valid = valid;
+                if (filtered != 0) {
+                    waveState.filteredMm = filtered;
+                }
+                waveState.totalCount++;
+                if (!valid) {
+                    waveState.invalidCount++;
+                }
+                if (err == 1) {
+                    waveState.timeoutRiseCount++;
+                } else if (err == 2) {
+                    waveState.timeoutFallCount++;
+                }
+                if (valid) {
+                    waveState.lastMs = now;
+                    if (waveState.minMm == 0 || mm < waveState.minMm) {
+                        waveState.minMm = mm;
+                    }
+                    if (mm > waveState.maxMm) {
+                        waveState.maxMm = mm;
+                    }
+                }
+                xSemaphoreGive(waveMutex);
+            }
+
+            // ---- 4) 推给屏幕（显示库内部判断要不要重画）----
+#if CFG_WAVE_SHOW_ON_SCREEN
+            if (CFG_RUN_DISPLAY) {
+                WaveState snap = {};
+                if (waveMutex != nullptr &&
+                    xSemaphoreTake(waveMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                    snap = waveState;
+                    xSemaphoreGive(waveMutex);
+                }
+                display.setWave(snap);
+            }
+#endif
+
+            // ---- 5) 连续读不到就提醒一次 ----
+            if (!valid) {
+                if (lastInvalid == 0 ||
+                    (now - lastInvalid) >= CFG_WAVE_INVALID_LIMIT * 1000UL) {
+                    lastInvalid = now;
+                    Serial.printf("测距无效: err=%u (1=ECHO没拉高 2=ECHO没拉低), "
+                                  "检查接线/分压/量程\n",
+                                  (unsigned)err);
+                }
+            } else {
+                lastInvalid = 0;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(WAVE_UPDATE_INTERVAL_MS));
+    }
+}
+
+// 打印一次测距状态（串口命令 w 和 i 都用它）
+static void printWaveState() {
+    WaveState snap = {};
+    if (waveMutex != nullptr &&
+        xSemaphoreTake(waveMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        snap = waveState;
+        xSemaphoreGive(waveMutex);
+    }
+
+    Serial.printf("测距: %u mm (%u.%u cm), %s, err=%u\n",
+                  (unsigned)snap.distanceMm, (unsigned)(snap.distanceMm / 10U),
+                  (unsigned)(snap.distanceMm % 10U),
+                  snap.valid ? "有效" : "无效", (unsigned)snap.errorCode);
+    Serial.printf("  滤波后=%u mm, 共%u 次, 无效%u (没拉高%u / 没拉低%u)\n",
+                  (unsigned)snap.filteredMm, (unsigned)snap.totalCount,
+                  (unsigned)snap.invalidCount,
+                  (unsigned)snap.timeoutRiseCount,
+                  (unsigned)snap.timeoutFallCount);
+    Serial.printf("  范围 %u~%u mm, TRIG=GPIO%d ECHO=GPIO%d (ECHO 必须分压)\n",
+                  (unsigned)snap.minMm, (unsigned)snap.maxMm, PIN_WAVE_TRIG,
+                  PIN_WAVE_ECHO);
+    if (snap.asnapValid) {
+        Serial.printf("  测厚起点: %u mm (%.1f 秒前)\n", (unsigned)snap.asnapMm,
+                      (double)((millis() - snap.asnapMs) / 1000.0));
+    }
+    if (snap.thicknessValid) {
+        Serial.printf("  测出的厚度: %d mm\n", (int)snap.thicknessMm);
+    }
+}
+
+// 串口命令 w：超声波测距
+//   w        打印一次当前测距状态
+//   w,s      记录“开始测量厚度”的起点（把书放上去之前先按）
+//   w,e      结束测量：厚度 = 起点距离 - 当前距离
+//   w,c      清空统计
+static void cmdWave(const char *arg) {
+    char sub = (arg != nullptr && arg[0] != '\0') ? arg[0] : '\0';
+
+    if (sub == '\0') {
+        printWaveState();
+        return;
+    }
+
+    if (sub == 's' || sub == 'S') {
+        WaveState snap = {};
+        if (waveMutex != nullptr &&
+            xSemaphoreTake(waveMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            snap = waveState;
+            if (snap.valid) {
+                waveState.asnapValid = true;
+                waveState.asnapMm = snap.filteredMm ? snap.filteredMm
+                                                    : snap.distanceMm;
+                waveState.asnapMs = millis();
+                waveState.thicknessValid = false;
+            }
+            xSemaphoreGive(waveMutex);
+        }
+        if (!snap.valid) {
+            Serial.println("测厚: 当前读数无效, 先把书放好再看状态");
+            return;
+        }
+        Serial.printf("测厚: 已记起点 %u mm, 现在把书放上去, 然后 w,e\n",
+                      (unsigned)snap.distanceMm);
+        return;
+    }
+
+    if (sub == 'e' || sub == 'E') {
+        int32_t diff = 0;
+        bool ok = false;
+        if (waveMutex != nullptr &&
+            xSemaphoreTake(waveMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            if (waveState.asnapValid && waveState.valid) {
+                uint32_t cur = waveState.filteredMm ? waveState.filteredMm
+                                                    : waveState.distanceMm;
+                diff = (int32_t)waveState.asnapMm - (int32_t)cur;
+                waveState.thicknessMm = diff;
+                waveState.thicknessValid = true;
+                ok = true;
+            }
+            xSemaphoreGive(waveMutex);
+        }
+        if (!ok) {
+            Serial.println("测厚: 没有起点快照或当前读数无效, 先 w,s 再 w,e");
+            return;
+        }
+        Serial.printf("测厚: 厚度 = %d mm (容差 ±%d mm)\n", (int)diff,
+                      CFG_THICK_TOLERANCE_MM);
+        return;
+    }
+
+    if (sub == 'c' || sub == 'C') {
+        if (waveMutex != nullptr &&
+            xSemaphoreTake(waveMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+            waveState.totalCount = 0;
+            waveState.invalidCount = 0;
+            waveState.timeoutRiseCount = 0;
+            waveState.timeoutFallCount = 0;
+            waveState.minMm = 0;
+            waveState.maxMm = 0;
+            waveState.asnapValid = false;
+            waveState.thicknessValid = false;
+            xSemaphoreGive(waveMutex);
+        }
+        Serial.println("测距: 统计已清空");
+        return;
+    }
+
+    Serial.println("测距命令: w 看状态 | w,s 记起点 | w,e 算厚度 | w,c 清统计");
+}
+
+// =============================================================================
 // 系统信息任务：采集 -> 共享结构体 + 显示库 + 周期打印
 // =============================================================================
 static void monitorTask(void *pvParameters) {
@@ -654,6 +927,21 @@ void setup() {
     registerCommands();
     cli.startTask();
 
+    // ---- 超声波测距初始化 ----
+    // ⚠️ 默认配置下 TRIG/ECHO(4/5) 与步进电机1(4,5,6,7) 冲突，两个都开会导致
+    //    电机工作时干扰回波。要用测距就把 CFG_ENABLE_STEPPER 置 0（或挪 ECHO 引脚）。
+    if (CFG_RUN_WAVE) {
+        waveMutex = xSemaphoreCreateMutex();
+        if (waveMutex == nullptr) {
+            Serial.println("测距: 互斥锁创建失败");
+        }
+        waveSensor.begin();
+        if (CFG_RUN_STEPPER) {
+            Serial.println("⚠️ 警告: 测距(4/5)与步进电机1(4,5,6,7)引脚重叠, "
+                           "建议把 CFG_ENABLE_STEPPER 置 0 或挪 ECHO 引脚");
+        }
+    }
+
     // ---- 步进电机初始化 ----
     // 三台电机共用一套速度；每台按 config.h 的行程设软限位。
     // 没接线的电机（ENABLE=0）这里会直接跳过，不会碰 GPIO。
@@ -710,7 +998,13 @@ void setup() {
     Serial.println("步进任务: 已在 config.h 里关掉 (CFG_ENABLE_STEPPER=0)");
 #endif
 
-    // 超声波任务在下一步骤里加，这里先把开关状态打出来
+#if CFG_ENABLE_WAVE
+    xTaskCreatePinnedToCore(waveTask, "wave", CFG_STACK_WAVE, nullptr,
+                            CFG_PRIO_WAVE, nullptr, CFG_CORE_WAVE);
+#else
+    Serial.println("测距任务: 已在 config.h 里关掉 (CFG_ENABLE_WAVE=0)");
+#endif
+
     Serial.printf("模块开关: husky=%d display=%d sysinfo=%d button=%d cmd=%d "
                   "stepper=%d wave=%d\n",
                   CFG_RUN_HUSKY, CFG_RUN_DISPLAY, CFG_RUN_SYSINFO,

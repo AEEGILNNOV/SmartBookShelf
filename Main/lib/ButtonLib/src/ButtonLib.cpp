@@ -4,18 +4,25 @@
 // ButtonLib 实现
 // =============================================================================
 
-// 按下/松开对应的标志表：index 0~2 -> {按下标志, 松开标志}
-static const uint8_t kPressFlags[3] = {BUTTON1_OPENFLAG, BUTTON2_OPENFLAG,
-                                       BUTTON3_OPENFLAG};
-static const uint8_t kReleaseFlags[3] = {BUTTON1_CLOSEFLAG, BUTTON2_CLOSEFLAG,
-                                         BUTTON3_CLOSEFLAG};
+// 按下/松开对应的标志表：index 0~4 -> {按下标志, 松开标志}
+// index 3 = A 键(测厚起点)，index 4 = B 键(算厚度)，将来接取书/还书流程
+static const uint8_t kPressFlags[ButtonLib::COUNT] = {
+    BUTTON1_OPENFLAG, BUTTON2_OPENFLAG, BUTTON3_OPENFLAG, BUTTON4_OPENFLAG,
+    BUTTON5_OPENFLAG
+};
+static const uint8_t kReleaseFlags[ButtonLib::COUNT] = {
+    BUTTON1_CLOSEFLAG, BUTTON2_CLOSEFLAG, BUTTON3_CLOSEFLAG, BUTTON4_CLOSEFLAG,
+    BUTTON5_CLOSEFLAG
+};
 
-ButtonLib::ButtonLib(int pin1, int pin2, int pin3) {
+ButtonLib::ButtonLib(int pin1, int pin2, int pin3, int pin4, int pin5) {
     _pins[0] = pin1;
     _pins[1] = pin2;
     _pins[2] = pin3;
+    _pins[3] = pin4;
+    _pins[4] = pin5;
 
-    for (uint8_t i = 0; i < 3; i++) {
+    for (uint8_t i = 0; i < COUNT; i++) {
         _history[i] = 0x00;
         _lastFlag[i] = 0x00;
     }
@@ -26,7 +33,7 @@ ButtonLib::ButtonLib(int pin1, int pin2, int pin3) {
 bool ButtonLib::begin() {
     // 按下为高电平 -> 用内部下拉；按下为低电平 -> 用内部上拉
     uint8_t mode = _activeHigh ? INPUT_PULLDOWN : INPUT_PULLUP;
-    for (uint8_t i = 0; i < 3; i++) {
+    for (uint8_t i = 0; i < COUNT; i++) {
         if (_pins[i] >= 0) {
             pinMode((uint8_t)_pins[i], mode);
         }
@@ -60,8 +67,8 @@ void ButtonLib::emitIfChanged(uint8_t index) {
         return;
     }
 
-    // 低 4 位全 1 = 连续 4 次按下；全 0 = 连续 4 次松开
-    uint8_t stable = _history[index] & 0x0F;
+    // 低 BUTTON_DEBOUNCE_BITS 位全 1 = 连续按下；全 0 = 连续松开
+    uint8_t stable = _history[index] & (uint8_t)((1U << BUTTON_DEBOUNCE_BITS) - 1U);
     uint8_t flag = 0x00;
     uint8_t pressed = 0;
 
@@ -91,7 +98,7 @@ void ButtonLib::emitIfChanged(uint8_t index) {
 }
 
 void ButtonLib::poll() {
-    for (uint8_t i = 0; i < 3; i++) {
+    for (uint8_t i = 0; i < COUNT; i++) {
         if (_pins[i] < 0) {
             continue;
         }
@@ -103,7 +110,7 @@ void ButtonLib::poll() {
 }
 
 bool ButtonLib::anyPressed() const {
-    for (uint8_t i = 0; i < 3; i++) {
+    for (uint8_t i = 0; i < COUNT; i++) {
         if (readPressed(_pins[i], _activeHigh)) {
             return true;
         }
@@ -115,13 +122,15 @@ void ButtonLib::buttonTaskEntry(void *pvParameters) {
     ButtonLib *self = (ButtonLib *)pvParameters;
     for (;;) {
         self->poll();
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(BUTTON_SCAN_INTERVAL_MS));
     }
 }
 
 bool ButtonLib::startTask() {
-    BaseType_t ret = xTaskCreatePinnedToCore(buttonTaskEntry, "button", 3072,
-                                             this, 1, nullptr, 0);
+    BaseType_t ret =
+        xTaskCreatePinnedToCore(buttonTaskEntry, "button", CFG_STACK_BUTTON,
+                                this, CFG_PRIO_BUTTON, nullptr,
+                                CFG_CORE_BUTTON);
     if (ret != pdPASS) {
         Serial.println("按键库: 任务创建失败");
         return false;
