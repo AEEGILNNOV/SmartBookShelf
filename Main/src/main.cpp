@@ -353,10 +353,12 @@ static void monitorTask(void *pvParameters) {
         }
 
         // 显示库只关心自己那一页，内部会判断要不要重画
-        display.setSystemInfo(snap);
+        if (CFG_RUN_DISPLAY) {
+            display.setSystemInfo(snap);
+        }
 
         uint32_t now = millis();
-        if (now - lastPrint >= SYSINFO_INTERVAL_MS * 10U) {
+        if (now - lastPrint >= SYSINFO_INTERVAL_MS * SYSINFO_PRINT_EVERY) {
             lastPrint = now;
             Serial.printf("SYS ram=%u/%uKB psram=%u/%uKB up=%lus heap=%u\n",
                           (unsigned)snap.ramUsedKb, (unsigned)snap.heapTotalKb,
@@ -374,8 +376,8 @@ static void monitorTask(void *pvParameters) {
 // 初始化
 // =============================================================================
 void setup() {
-    Serial.begin(115200);
-    delay(200);  // 等串口稳定
+    Serial.begin(CFG_SERIAL_BAUD);
+    delay(CFG_SERIAL_BOOT_DELAY_MS);  // 等串口稳定
 
     // ---- 互斥锁 ----
     infoMutex = xSemaphoreCreateMutex();
@@ -387,11 +389,17 @@ void setup() {
     printBanner();
 
     // ---- 各库初始化 ----
-    display.begin();
-    display.showMessage("SmartBookShelf BOOT", 2000);
+    // 用编译期常量判断，别用 #if 把函数切成碎片（配置项一变，编译器会直接优化掉）
+    if (CFG_RUN_DISPLAY) {
+        display.begin();
+        display.showMessage("SmartBookShelf BOOT",
+                            (uint32_t)CFG_MESSAGE_HOLD_MS);
+    }
 
-    buttons.begin();
-    buttons.startTask();
+    if (CFG_RUN_BUTTON) {
+        buttons.begin();
+        buttons.startTask();
+    }
 
     cli.begin();
     registerCommands();
@@ -399,13 +407,33 @@ void setup() {
 
     // ---- 首次采集系统信息，让屏幕第一页就有数据 ----
     sysInfoCollect(systemInfo);
-    display.setSystemInfo(systemInfo);
+    if (CFG_RUN_DISPLAY) {
+        display.setSystemInfo(systemInfo);
+    }
     sysInfoPrint(systemInfo);
 
     // ---- 建任务 ----
-    // recogTask 独占二哈 I2C，放核心 1；其它都在核心 0
-    xTaskCreatePinnedToCore(recogTask, "recog", 8192, nullptr, 3, nullptr, 1);
-    xTaskCreatePinnedToCore(monitorTask, "monitor", 4096, nullptr, 1, nullptr, 0);
+    // recogTask 独占二哈 I2C，放核心 1；其它都在核心 0。
+    // 栈/优先级/核心全部来自 config.h 的 CFG_STACK_xxx / CFG_PRIO_xxx / CFG_CORE_xxx，
+    // 不要在这里写死数字。
+#if CFG_ENABLE_HUSKY
+    xTaskCreatePinnedToCore(recogTask, "recog", CFG_STACK_RECOG, nullptr,
+                            CFG_PRIO_RECOG, nullptr, CFG_CORE_RECOG);
+#else
+    Serial.println("识别任务: 已在 config.h 里关掉 (CFG_ENABLE_HUSKY=0)");
+#endif
+
+#if CFG_ENABLE_SYSINFO
+    xTaskCreatePinnedToCore(monitorTask, "monitor", CFG_STACK_MONITOR, nullptr,
+                            CFG_PRIO_MONITOR, nullptr, CFG_CORE_MONITOR);
+#endif
+
+    // 步进与超声波任务在后面的步骤里加，这里先把开关状态打出来
+    Serial.printf("模块开关: husky=%d display=%d sysinfo=%d button=%d cmd=%d "
+                  "stepper=%d wave=%d\n",
+                  CFG_RUN_HUSKY, CFG_RUN_DISPLAY, CFG_RUN_SYSINFO,
+                  CFG_RUN_BUTTON, CFG_RUN_SERIALCMD, CFG_RUN_STEPPER,
+                  CFG_RUN_WAVE);
 
     Serial.println("BOOT_DONE");
     cli.printHelp();
@@ -419,5 +447,5 @@ void loop() {
     while (xQueueReceive(buttons.queue(), &event, 0) == pdPASS) {
         handleButtonEvent(event);
     }
-    vTaskDelay(pdMS_TO_TICKS(20));
+    vTaskDelay(pdMS_TO_TICKS(CFG_LOOP_DELAY_MS));
 }

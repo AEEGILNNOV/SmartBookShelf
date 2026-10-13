@@ -34,17 +34,14 @@
 #define PAGE_BOOKS   0x02   // 已识别书列表页
 #define PAGE_COUNT   3
 
-// 最多记录多少本不同的书（按 ID + 内容去重）
-#ifndef MAX_BOOK_RECORDS
-#define MAX_BOOK_RECORDS 12
+// 屏幕分辨率：从 TFT_eSPI 的宏推导（本头文件已在上面 include 过 <TFT_eSPI.h>）。
+// 业务代码算坐标一律用 SCR_W/SCR_H，不要写死 240/320。
+// MAX_BOOK_RECORDS、字体宏、队列与任务参数都在 include/config.h 里，改配置请改那个文件。
+#ifndef SCR_W
+#define SCR_W TFT_WIDTH
 #endif
-
-// 屏上中文字体 / 英文字体（改字号只改这两行）
-#ifndef DISPLAY_FONT_CJK
-#define DISPLAY_FONT_CJK (&lv_font_simsun_16_cjk)
-#endif
-#ifndef DISPLAY_FONT_ASCII
-#define DISPLAY_FONT_ASCII (&lv_font_montserrat_12)
+#ifndef SCR_H
+#define SCR_H TFT_HEIGHT
 #endif
 
 // 已识别书的累计记录（按 ID + 内容去重，用于“扫多本书”）
@@ -105,7 +102,7 @@ private:
 
     uint8_t _page;
     bool _dirty;
-    char _message[96];         // UTF-8 中文一个字 3 字节，留够一条整句
+    char _message[CFG_MESSAGE_LEN];  // UTF-8 中文一个字 3 字节，留够一条整句
     uint32_t _messageUntil;
     bool _messageActive;
     uint32_t _lastSig;

@@ -1,5 +1,8 @@
 #include "DisplayLib.h"
 
+// 全工程唯一配置来源（刷屏缓冲行数 / 消息停留时间 / 任务栈与核心都在这里）
+#include "config.h"
+
 // =============================================================================
 // DisplayLib 实现（LVGL 8.4 中文版）
 //
@@ -28,10 +31,8 @@ static lv_obj_t *s_msgPanel = nullptr;
 static lv_obj_t *s_msgLabel = nullptr;
 
 //每块 draw buffer 占几行：240 x 40 x 2B = 19.2KB，两块都在 PSRAM。
-//屏上出现横向撕裂/闪烁时往下调到 20；内部 RAM 更紧就往上调到 80。
-#ifndef DISPLAY_DRAW_LINES
-#define DISPLAY_DRAW_LINES 40
-#endif
+//行数由 config.h 的 CFG_LV_BUF_LINES 决定（原 DISPLAY_DRAW_LINES 已合并过去），
+//屏上出现横向撕裂/闪烁时把 CFG_LV_BUF_LINES 往下调到 20。
 
 //配色（改配色只改这几行）
 #define COLOR_TITLE_BG 0x0088FF
@@ -117,14 +118,15 @@ bool DisplayLib::begin() {
     _tft.setRotation(TFT_ROTATION);
     _tft.fillScreen(TFT_BLACK);
 
-    // 背光：TFT_eSPI 只在部分驱动里自动初始化 TFT_BL，这里显式做一次
+    // 背光：TFT_eSPI 只在部分驱动里自动初始化 TFT_BL，这里显式做一次。
+    // 亮度用 LEDC 控制，别把 BL 直接接 VCC（config.h 的 CFG_TFT_BL_LEVEL 可调）。
     pinMode(PIN_TFT_BL, OUTPUT);
     digitalWrite(PIN_TFT_BL, TFT_BACKLIGHT_ON);
 
     // ---- 2) LVGL ----
     lv_init();
 
-    size_t pixels = (size_t)SCR_W * DISPLAY_DRAW_LINES;
+    size_t pixels = (size_t)SCR_W * CFG_LV_BUF_LINES;
     s_buf1 = (lv_color_t *)displayAlloc(pixels * sizeof(lv_color_t));
     s_buf2 = (lv_color_t *)displayAlloc(pixels * sizeof(lv_color_t));
     if (s_buf1 == nullptr || s_buf2 == nullptr) {
@@ -149,8 +151,8 @@ bool DisplayLib::begin() {
     _sigValid = false;
 
     // 建显示任务：LVGL 只有这一个消费者，所以不需要总线锁
-    xTaskCreatePinnedToCore(displayTaskEntry, "display", 8192, this, 2, nullptr,
-                            0);
+    xTaskCreatePinnedToCore(displayTaskEntry, "display", CFG_STACK_DISPLAY, this,
+                            CFG_PRIO_DISPLAY, nullptr, CFG_CORE_DISPLAY);
 
     Serial.printf(
         "显示库: ILI9341 %dx%d rotation=%d + LVGL8 已就绪 (缓冲 %uKB x2 %s)\n",
@@ -212,7 +214,7 @@ void DisplayLib::createUi() {
     lv_obj_set_style_text_font(s_labelFooter, DISPLAY_FONT_ASCII, 0);
     lv_obj_set_style_text_color(s_labelFooter, lv_color_hex(COLOR_HINT), 0);
     lv_obj_align(s_labelFooter, LV_ALIGN_BOTTOM_LEFT, 8, -8);
-    lv_label_set_text(s_labelFooter, "key1 next  key2 reconnect  key3 learn");
+    lv_label_set_text(s_labelFooter, CFG_FOOTER_HINT);
 
     // ---- 消息浮层（整屏，默认隐藏） ----
     s_msgPanel = lv_obj_create(scr);
@@ -352,8 +354,17 @@ void DisplayLib::setPage(uint8_t page) {
     }
 }
 
+// 翻页：必须在锁里读当前页再算下一页，否则两个任务同时翻会漏页
 void DisplayLib::nextPage() {
-    setPage((uint8_t)((_page + 1) % PAGE_COUNT));
+    if (_mutex == nullptr) {
+        return;
+    }
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        _page = (uint8_t)((_page + 1) % PAGE_COUNT);
+        _dirty = true;
+        _sigValid = false;  // 换页必须重画
+        xSemaphoreGive(_mutex);
+    }
 }
 
 uint8_t DisplayLib::page() const {
@@ -378,7 +389,7 @@ void DisplayLib::taskLoop() {
     for (;;) {
         update();
         lv_timer_handler();
-        vTaskDelay(pdMS_TO_TICKS(5));
+        vTaskDelay(pdMS_TO_TICKS(CFG_DISPLAY_INTERVAL_MS));
     }
 }
 
@@ -394,11 +405,12 @@ static uint32_t computeSignature(const HuskyFrame &f, const SystemInfo &info,
     sig = (sig ^ (uint32_t)(f.modeIndex & 0xFF)) * 16777619UL;
     sig = (sig ^ (uint32_t)(f.wordNum & 0xFF)) * 16777619UL;
     sig = (sig ^ (uint32_t)(f.learnedNum & 0xFF)) * 16777619UL;
-    // 帧数只按“每 4 帧”参与，避免每帧都重画
-    sig = (sig ^ (f.frameCount / 4U)) * 16777619UL;
+    // 帧数只按“每 CFG_SIGNATURE_FRAME_STEP 帧”参与，避免每帧都重画
+    sig = (sig ^ (f.frameCount / (uint32_t)CFG_SIGNATURE_FRAME_STEP)) *
+          16777619UL;
     sig = (sig ^ f.errorCount) * 16777619UL;
 
-    for (int16_t i = 0; i < f.wordNum && i < 4; i++) {
+    for (int16_t i = 0; i < f.wordNum && i < CFG_STATUS_WORD_SHOWN; i++) {
         sig = (sig ^ (uint32_t)(f.words[i].id & 0xFF)) * 16777619UL;
         sig = (sig ^ (uint32_t)(f.words[i].x & 0xFF)) * 16777619UL;
         const char *t = f.words[i].content;
@@ -514,7 +526,7 @@ void DisplayLib::update() {
 // 三个页面 + 消息页
 // =============================================================================
 void DisplayLib::showStatusPage(const HuskyFrame &f, int16_t bookNum) {
-    char body[512];
+    char body[CFG_STATUS_TEXT_LEN];
     char recent[HUSKY_TEXT_LEN + 8];
     const char *modeName = "未知";
 
@@ -583,7 +595,7 @@ void DisplayLib::showSysInfoPage(const SystemInfo &info) {
 }
 
 void DisplayLib::showBooksPage(const BookRecord *books, int16_t bookNum) {
-    char body[512];
+    char body[CFG_STATUS_TEXT_LEN];
     int off = 0;
     int16_t shown = bookNum;
 

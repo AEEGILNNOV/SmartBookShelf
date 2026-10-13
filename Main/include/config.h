@@ -87,6 +87,18 @@
 #define CFG_ENABLE_LORA 0         // LoRa / ESP-NOW 组网
 #endif
 
+// config.h 只给宏，这里再给一份“编译期常量”，方便 main.cpp 写成
+//   if (CFG_RUN_DISPLAY) { ... }   而不是每个调用点都套一组 #if。
+// 判断结果和上面的开关完全一致，开关一改，这里自动跟着变。
+// 命名用 CFG_RUN_xxx（RUN = 这次固件真的会跑这个模块）。
+#define CFG_RUN_HUSKY     (CFG_ENABLE_HUSKY != 0)
+#define CFG_RUN_DISPLAY   (CFG_ENABLE_DISPLAY != 0)
+#define CFG_RUN_SYSINFO   (CFG_ENABLE_SYSINFO != 0)
+#define CFG_RUN_BUTTON    (CFG_ENABLE_BUTTON != 0)
+#define CFG_RUN_SERIALCMD (CFG_ENABLE_SERIALCMD != 0)
+#define CFG_RUN_STEPPER   (CFG_ENABLE_STEPPER != 0)
+#define CFG_RUN_WAVE      (CFG_ENABLE_WAVE != 0)
+
 
 // -----------------------------------------------------------------------------
 // 2. 串口
@@ -139,12 +151,13 @@
 #define PIN_TFT_BL 47
 #endif
 
-// 分辨率与方向（业务代码算坐标用这两个宏，不要写死数字）
-#ifndef SCR_W
-#define SCR_W TFT_WIDTH
-#endif
-#ifndef SCR_H
-#define SCR_H TFT_HEIGHT
+// 分辨率：SCR_W/SCR_H 不在本文件定义，它们在 DisplayLib.h 里从 TFT_WIDTH/TFT_HEIGHT
+// 推导（因为本文件会被不碰屏幕的库 include，那时 TFT_WIDTH 还不存在）。
+// 下面这段只做“包含顺序”体检：如果已经 include 了 <TFT_eSPI.h>，却拿不到 TFT_WIDTH，
+// 说明 TFT_eSPI 的 USER_SETUP 没生效，会在这里直接报错，
+// 而不是在别处报一句看不懂的 “TFT_WIDTH was not declared”。
+#if defined(_TFT_eSPIH_) && !defined(TFT_WIDTH)
+#error "config.h: TFT_eSPI 的 USER_SETUP 宏没生效，请检查 platformio.ini 的 build_flags"
 #endif
 
 // 背光亮度（LEDC 占空比 0~255）。排错时不要直接把 BL 接 VCC。
@@ -153,6 +166,8 @@
 #endif
 
 // LVGL 刷屏缓冲：2 块 240x40 的 16 位缓冲 ≈ 19.2KB，优先放 PSRAM
+// 这一项就是 DisplayLib.cpp 里刷屏缓冲的行数（原来叫 DISPLAY_DRAW_LINES，已合并过来）。
+// 屏幕出现横向撕裂/闪烁就往下调到 20；内部 RAM 更紧就往上调到 80。
 #ifndef CFG_LV_BUF_LINES
 #define CFG_LV_BUF_LINES 40
 #endif
@@ -174,6 +189,37 @@
 // 消息页自动消失时间(ms)
 #ifndef CFG_MESSAGE_HOLD_MS
 #define CFG_MESSAGE_HOLD_MS 3000
+#endif
+
+// 消息文字缓冲（UTF-8 一个汉字 3 字节，96 字节能放一条整句）
+#ifndef CFG_MESSAGE_LEN
+#define CFG_MESSAGE_LEN 96
+#endif
+
+// 状态页正文缓冲（多行快照文本，别太大，屏上放不下也白搭）
+#ifndef CFG_STATUS_TEXT_LEN
+#define CFG_STATUS_TEXT_LEN 512
+#endif
+
+// 显示任务一轮的节拍(ms)：实际是否重画由“脏标志 + 内容签名”决定，改大不闪屏
+#ifndef CFG_DISPLAY_INTERVAL_MS
+#define CFG_DISPLAY_INTERVAL_MS 5
+#endif
+
+// 内容签名里“帧数”按每 N 帧参与一次比较，避免每帧都重画
+// 4 = 每 4 帧才可能刷新一次状态页上的帧计数
+#ifndef CFG_SIGNATURE_FRAME_STEP
+#define CFG_SIGNATURE_FRAME_STEP 4
+#endif
+
+// 页脚操作提示。改按键定义时同步改这一行（LVGL 只认 ASCII 才会用 montserrat_12）
+#ifndef CFG_FOOTER_HINT
+#define CFG_FOOTER_HINT "key1 next  key2 reconnect  key3 learn"
+#endif
+
+// 最多显示（或参与签名比较）几条识别块
+#ifndef CFG_STATUS_WORD_SHOWN
+#define CFG_STATUS_WORD_SHOWN 4
 #endif
 
 
@@ -241,7 +287,9 @@
 #define HUSKY_WORD_MAX 8
 #endif
 
-// 连续几次读超时就判掉线、走重连流程
+// 累计读超时多少次就判一次掉线、走重连流程
+// ⚠️ 目前 recogTask 是按“累计错误数的整数倍”判的（errorCount % HUSKY_ERROR_LIMIT），
+//    不是严格的“连续 N 次”；等接线实测稳定后再按这个宏改成连续计数。
 #ifndef HUSKY_ERROR_LIMIT
 #define HUSKY_ERROR_LIMIT 3
 #endif
@@ -334,7 +382,7 @@
 // 想改核心分配，从下面的 CFG_xxx_CORE 宏改，不要散落在 xTaskCreatePinnedToCore。
 // -----------------------------------------------------------------------------
 #ifndef DISPLAY_INTERVAL_MS
-#define DISPLAY_INTERVAL_MS 500       // 显示任务一轮的节拍（实际靠脏标志控制是否重画）
+#define DISPLAY_INTERVAL_MS 500       // 显示任务的“重建界面”节拍（重启/重连后兜底重画用）
 #endif
 #ifndef SYSINFO_INTERVAL_MS
 #define SYSINFO_INTERVAL_MS 1000      // 系统信息采集周期

@@ -19,8 +19,9 @@ pio device monitor -e esp32-s3-devkitc-1     # 115200
 ```
 Main/
 ├─ include/
-│  ├─ BoardConfig.h          ← 全工程唯一引脚/参数来源（每个宏都可 -D 覆盖）
-│  └─ lv_conf.h              ← LVGL 8.4 配置（LV_FONT_SIMSUN_16_CJK=1，屏上中文靠它）
+│  ├─ config.h              ← ★全工程唯一配置来源（引脚/节奏/开关/阈值，每个宏都可 -D 覆盖）
+│  ├─ BoardConfig.h         ← 兼容壳：只有一行 #include "config.h"，老代码继续有效
+│  └─ lv_conf.h             ← LVGL 8.4 配置（LV_FONT_SIMSUN_16_CJK=1，屏上中文靠它）
 ├─ lib/
 │  ├─ HuskyLib/              ← 二哈 I2C + 内置 CNN 识别（含 library.json）
 │  ├─ DisplayLib/            ← ILI9341 + LVGL 8.4 中文界面（状态页/系统信息页/书列表页/消息页）
@@ -29,7 +30,7 @@ Main/
 │  ├─ SerialCmdLib/          ← 串口命令行解析 + 注册式分派
 │  └─ DFRobot_HuskylensV2/   ← 二哈底层驱动（vendor，离线可编译）
 ├─ src/main.cpp              ← 只做拼装：全局对象 / 命令注册 / 任务
-├─ platformio.ini            ← N16R8 + TFT_eSPI + LVGL + 二哈 + 按键参数
+├─ platformio.ini            ← N16R8 + TFT_eSPI(USER_SETUP) + LVGL 依赖（业务配置在 config.h）
 └─ README.md                 ← 本文件（库 API 文档）
 ```
 
@@ -126,7 +127,7 @@ sysInfoDiff(before, after, out);              // 求变化量，查内存泄漏
 ```cpp
 #include "ButtonLib.h"
 
-ButtonLib buttons;                  // 默认用 BoardConfig.h 里的三个引脚
+ButtonLib buttons;                  // 默认用 config.h 里的三个引脚
 buttons.begin();                    // 配引脚 + 建事件队列
 buttons.startTask();                // 建 buttonTask(核心0, 5ms 一轮)
 
@@ -204,21 +205,33 @@ serialCmdTask --命令队列-->  各命令回调
 
 ---
 
-## 5. 引脚（唯一来源：`include/BoardConfig.h`）
+## 5. 引脚（唯一来源：`include/config.h` 第 3~9 节）
 
 | 外设 | 引脚 | 备注 |
 | --- | --- | --- |
 | ILI9341 | SCLK=12 MOSI=11 CS=10 DC=9 RST=8 BL=47 | TFT_eSPI 参数在 `platformio.ini` |
 | 二哈 HUSKYLENS 2 | SDA=1 SCL=2 | I2C 地址 0x50，超时 1000ms |
-| 按键 | 42 / 41 / 40 | 按下高电平，可选 |
+| 按键 | 45 / 46 / 0 | 按下高电平，可选（**已从 40/41/42 挪走**） |
+| 步进电机1（推出小车） | 4, 5, 6, 7 | ULN2003 的 IN1~IN4；与 HC-SR04 冲突 |
+| 步进电机2（中间夹层） | 15, 16, 17, 18 | ULN2003 的 IN1~IN4 |
+| 步进电机3（升降平台） | 38, 39, 48, 21 | 机械到位后再接（默认关） |
+| HC-SR04 | TRIG=4 ECHO=5 | ECHO 是 5V，必须分压 |
 
 **不能接外设**：GPIO26-32（封装内 Flash）、GPIO33-37（OPI PSRAM）、GPIO22-25（不存在）、
 GPIO19/20（USB）、GPIO43/44（UART0）。
 
-⚠️ **冲突提醒一**：按键 GPIO40/41/42 同时是 OV2640 的 D5/D6/D7。本工程不接 OV2640；
-若线上同时接着摄像头，三个按键不要接（或用 `-DBUTTON_PIN1=45` 之类挪脚）。
+⚠️ **为什么按键从 40/41/42 挪到 45/46/0**：40/41/42 同时是 OV2640 的 D5/D6/D7。
+改完以后 40/41/42 空出来给摄像头，步进电机1 用的 4/5/6/7 也不和按键打架。
 
-⚠️ **冲突提醒二**：`PIN_HUSKY_SDA=1` 与 `Master/include/board_pins.h` 里 OV2640 的
+⚠️ **按键 3 = GPIO0 是 BOOT 脚**：芯片复位时若被按住会进下载模式（正常上电后再按没问题）。
+DevKitC 上 GPIO0 有外部上拉，如果觉得别扭，建议改成按下低电平：
+`-DBUTTON_PIN3=45 -DBUTTON_TRUE_VALUE=0`，或直接换到空闲脚。
+
+⚠️ **HC-SR04 与步进电机1 抢 GPIO4/5**：同一时间只能接一个。
+先做测距就把 `CFG_ENABLE_STEPPER` 置 0；先做电机就把 ECHO 挪到空闲脚
+（如 `-DPIN_WAVE_TRIG=39 -DPIN_WAVE_ECHO=48`）。
+
+⚠️ **冲突提醒**：`PIN_HUSKY_SDA=1` 与 `Master/include/board_pins.h` 里 OV2640 的
 SCCB SDA（也是 GPIO1）冲突。要“本地摄像头 + 二哈”同时用，必须把其中一个挪脚。
 
 ---
@@ -244,3 +257,34 @@ SCCB SDA（也是 GPIO1）冲突。要“本地摄像头 + 二哈”同时用，
    接入前（纯 TFT_eSPI）是 `Flash 5.2% (337537/6553600)`，LVGL + 中文字体约多占 334KB Flash。
 9. 还没做的：机械控制（3 台 42 步进 + ESP32-C3）、语音、组网。
    本工程目前只有识别 + 显示 + 系统信息 + 按键 + 串口命令这五块。
+
+---
+
+## 7. 配置改动（config.h 集中化）
+
+1. **新增 `include/config.h`**：13 节集中配置 —— 模块开关 / 串口 / 显示 / 二哈 /
+   按键 / 串口命令 / 任务节奏与核心分配 / 超声波 / 步进与机械尺寸 / ESP32-C3 链路 /
+   日志宏 / 库版本。每个宏都用 `#ifndef` 包住，所以 `platformio.ini` 里仍可用
+   `-DCFG_xxx=yyy` 临时覆盖。
+2. **`BoardConfig.h` 变成兼容壳**：只剩一行 `#include "config.h"`。
+   宏名一个都没改，5 个库的 include 不用动；新代码请直接 `#include "config.h"`。
+3. **`platformio.ini` 只留“必须在编译命令行里给”的宏**：`BOARD_HAS_PSRAM`、`-Iinclude`、
+   以及 TFT_eSPI 的 USER_SETUP 宏（它必须在编译 TFT_eSPI 库本身时就存在）。
+   原来与 config.h 重复的 `-DPIN_HUSKY_*` / `-DBUTTON_PIN*` / `-D*_QUEUE_SIZE` 已删除。
+4. **模块开关是“真开关”**：`CFG_ENABLE_DISPLAY=0` 时显示库整体被编译掉，
+   实测 Flash 从 10.4% 降到 4.9%、RAM 从 7.7% 降到 7.2%，链接无未定义符号。
+5. **屏上缓冲行数统一**：`DisplayLib.cpp` 原来的 `DISPLAY_DRAW_LINES` 并入
+   `config.h` 的 `CFG_LV_BUF_LINES`，一个参数管一处。
+6. **`nextPage()` 加了锁**：原来它在锁外先读 `_page` 再调 `setPage()`，
+   两个任务同时翻页会漏页；现在读改写都在同一把锁里。
+7. **包含顺序保护**：`SCR_W/SCR_H` 移到 `DisplayLib.h`（紧跟 `<TFT_eSPI.h>` 之后），
+   config.h 里加了一条 `_TFT_eSPIH_` 体检，TFT_eSPI 的 USER_SETUP 没生效时
+   会在编译期直接报清楚的中文错误。
+
+### ⚠️ 需要你确认的两处硬件取舍
+
+1. **按键 3 = GPIO0 是 BOOT 脚**。这样接能用，但复位时按住会进下载模式。
+   不想用 BOOT 脚就改成 `-DBUTTON_PIN3=48`（或 21/38/39，注意别和电机3 冲突）；
+   GPIO0 在 DevKitC 上有外部上拉，也可以改成按下低电平 `-DBUTTON_TRUE_VALUE=0`。
+2. **HC-SR04 的 TRIG=4/ECHO=5 与步进电机1 的 4/5/6/7 冲突**。
+   两个外设不能同时接；两个任务眼下都还没建（下一步做步进时会按开关挑一个）。
