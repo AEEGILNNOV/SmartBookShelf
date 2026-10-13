@@ -160,16 +160,101 @@
 #error "config.h: TFT_eSPI 的 USER_SETUP 宏没生效，请检查 platformio.ini 的 build_flags"
 #endif
 
-// 背光亮度（LEDC 占空比 0~255）。排错时不要直接把 BL 接 VCC。
+// 背光亮度（LEDC 占空比 0~255，只在 CFG_TFT_BL_USE_LEDC=1 时生效）。
+// 排错时不要直接把 BL 接 VCC。
 #ifndef CFG_TFT_BL_LEVEL
 #define CFG_TFT_BL_LEVEL 255
 #endif
 
-// LVGL 刷屏缓冲：2 块 240x40 的 16 位缓冲 ≈ 19.2KB，优先放 PSRAM
+// 背光驱动方式：
+//   0 = digitalWrite（默认，和已经验证过的 TFT_Test 完全一样，最稳）
+//   1 = LEDC(PWM)，这时 CFG_TFT_BL_LEVEL 才是“亮度”
+// 屏全黑先别动这里：digitalWrite 是已知能亮的写法，先排除背光被 PWM 关掉的可能。
+#ifndef CFG_TFT_BL_USE_LEDC
+#define CFG_TFT_BL_USE_LEDC 0
+#endif
+// LEDC 通道（0~15）与频率(Hz)，只在上面为 1 时用
+#ifndef CFG_TFT_BL_LEDC_CHANNEL
+#define CFG_TFT_BL_LEDC_CHANNEL 7
+#endif
+#ifndef CFG_TFT_BL_LEDC_FREQ
+#define CFG_TFT_BL_LEDC_FREQ 5000
+#endif
+
+// LVGL 刷屏缓冲：2 块 240x40 的 16 位缓冲 ≈ 19.2KB
 // 这一项就是 DisplayLib.cpp 里刷屏缓冲的行数（原来叫 DISPLAY_DRAW_LINES，已合并过来）。
 // 屏幕出现横向撕裂/闪烁就往下调到 20；内部 RAM 更紧就往上调到 80。
 #ifndef CFG_LV_BUF_LINES
 #define CFG_LV_BUF_LINES 40
+#endif
+
+// 刷屏缓冲放哪：1 = PSRAM(ps_malloc，原来的写法)   0 = 内部 RAM
+// S3 的 TFT_eSPI 走 CPU 搬运像素，两者都能用；屏上出现随机噪点/花屏时，
+// 可以改成 0 用内部 RAM 试（内部 RAM 更快，两块约 38KB，够用）。
+#ifndef CFG_LV_BUF_IN_PSRAM
+#define CFG_LV_BUF_IN_PSRAM 1
+#endif
+
+// LVGL 刷屏回调里 pushColors 是否交换字节：
+//   1 = 交换（默认，配 lv_conf.h 的 LV_COLOR_16_SWAP=0）
+//   0 = 不交换（配 LV_COLOR_16_SWAP=1）
+// 屏上出现“颜色反了 / 偏蓝绿”就是这里和 LV_COLOR_16_SWAP 没对上，改其中一个即可。
+// 注意：字节序不对只会让颜色错，不会让整屏没内容。
+#ifndef CFG_LV_PUSH_SWAP
+#define CFG_LV_PUSH_SWAP 1
+#endif
+
+// -----------------------------------------------------------------------------
+// 3.1 屏幕排错（分层点亮：一次只验证一层，别一上来就怀疑字库）
+//
+// 为什么要有这一段：LVGL 界面的“整屏没内容”和“字库缺字”是两回事——
+// 缺字只会让某几个汉字变空白，标题栏底色、页面背景这些不用字体的东西照样会画。
+// 所以“整屏全黑/全白”一定不在字库这一层，按下面的顺序往下查：
+//
+//   CFG_DISPLAY_BRINGUP
+//     0 = 正常：直接建 LVGL 中文界面
+//     1 = 只用 TFT_eSPI 画彩条，**完全不初始化 LVGL**
+//         -> 验证 接线/供电/背光/SPI/屏驱动型号 这条链
+//     2 = 彩条 + LVGL 纯色块（一个字体都不碰）
+//         -> 验证 LVGL 刷屏链路（tick / flush_cb / pushColors）
+//     3 = 彩条 + LVGL 纯色块 + 完整中文界面（等于 0 再加一次开机彩条）
+//
+// 判读表：
+//   彩条能出来、界面不出来 -> 硬件这条链是好的，问题在 LVGL/字体层
+//   彩条也没有            -> 和 LVGL、字库都无关，查背光/接线/驱动型号
+//
+// 对应的一键环境（platformio.ini 里已经配好）：
+//   pio run -e screen-raw  -t upload    只用彩条，不进 LVGL
+//   pio run -e screen-lvgl -t upload    彩条 + LVGL 纯色块 + 刷屏日志
+//   pio run -e screen-log  -t upload    正常界面 + 刷屏日志 + LVGL 日志
+// -----------------------------------------------------------------------------
+#ifndef CFG_DISPLAY_BRINGUP
+#define CFG_DISPLAY_BRINGUP 0
+#endif
+
+// 开机先画一次 TFT_eSPI 彩条并停留多少 ms（0 = 不画，正常固件保持 0）
+#ifndef CFG_TFT_SPLASH_MS
+#define CFG_TFT_SPLASH_MS 0
+#endif
+
+// 串口命令 d,1 的彩条自检停留时间(ms)：画完自动让 LVGL 整屏重画，回到界面
+#ifndef CFG_SELFTEST_BAR_HOLD_MS
+#define CFG_SELFTEST_BAR_HOLD_MS 1500
+#endif
+
+// 显示任务心跳：每 N ms 打一行“刷屏次数 / 最近一次耗时 / LVGL 时钟 / 栈余量”
+//   0 = 关（正常固件保持 0）
+// 打开后能直接区分两种完全不同的故障：
+//   刷屏次数一直是 0        -> LVGL 根本没在刷（tick / draw buffer / 驱动注册的问题）
+//   刷屏次数在涨但屏是黑的  -> 数据发出去了屏没反应（背光/接线/屏型号的问题）
+#ifndef CFG_DISPLAY_FLUSH_LOG_MS
+#define CFG_DISPLAY_FLUSH_LOG_MS 0
+#endif
+
+// 把 LVGL 自己的日志（warning/info）打到串口。默认关（和原来一致）。
+// 例：字库是 RLE 压缩的却没开 LV_USE_FONT_COMPRESSED 时，LVGL 会在这里出声。
+#ifndef CFG_LV_LOG_TO_SERIAL
+#define CFG_LV_LOG_TO_SERIAL 0
 #endif
 
 // 一页最多记录几本书（按 ID + 书名去重）
@@ -762,7 +847,7 @@
 #define HUSKYLIB_VERSION "1.0.0"
 #endif
 #ifndef DISPLAYLIB_VERSION
-#define DISPLAYLIB_VERSION "1.0.0"
+#define DISPLAYLIB_VERSION "1.1.0"    // 1.1.0: 加屏幕分层排错(彩条/纯色块/刷屏心跳/总线锁)
 #endif
 #ifndef SYSINFOLIB_VERSION
 #define SYSINFOLIB_VERSION "1.0.0"

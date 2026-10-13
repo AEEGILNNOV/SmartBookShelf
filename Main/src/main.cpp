@@ -130,6 +130,7 @@ static void stepperTask(void *pvParameters);
 static void waveTask(void *pvParameters);
 static void cmdWave(const char *arg);
 static void printWaveState();
+static void cmdDisplay(const char *arg);
 
 // -----------------------------------------------------------------------------
 // 工具
@@ -512,8 +513,13 @@ static void registerCommands() {
     cli.registerCommand('c', "清空书列表记录", cmdClearBooks);
     cli.registerCommand('m', "步进电机(手动调试): m 看用法, m,1,300 / m,z", cmdMotor);
     cli.registerCommand('z', "步进急停: z 全停, z,2 停电机2", cmdStopMotor);
-    cli.registerCommand('w', "超声波测距: w 看状态, w,s 记起点, w,e 算厚度, w,c 清统计",
+    // ⚠️ 超声波必须用 u（Ultrasonic），不能用 w：
+    //    w 已经被“保存知识库”占了，而命令表是“第一个注册的生效”，
+    //    以前两条都写 w，结果超声波那条永远进不来（A/B 键会变成保存知识库）。
+    //    SerialCmdLib 现在也会拦重复注册并在串口报警。
+    cli.registerCommand('u', "超声波测距: u 看状态, u,s 记起点, u,e 算厚度, u,c 清统计",
                         cmdWave);
+    cli.registerCommand('d', "显示诊断: d 看状态, d,1 画彩条自检", cmdDisplay);
 }
 
 // -----------------------------------------------------------------------------
@@ -545,11 +551,11 @@ static void handleButtonEvent(const ButtonEvent &event) {
         // 现在机械还没接，先把它们接到测距的“记起点 / 算厚度”上，
         // 等 stepperTask 能整套动作时，把 sendCommand 换成取书/还书流程即可。
         case 4:
-            cli.sendCommand("w,s");
+            cli.sendCommand("u,s");
             Serial.println("按键A: 记测厚起点");
             break;
         case 5:
-            cli.sendCommand("w,e");
+            cli.sendCommand("u,e");
             Serial.println("按键B: 算书本厚度");
             break;
         default:
@@ -778,11 +784,11 @@ static void printWaveState() {
     }
 }
 
-// 串口命令 w：超声波测距
-//   w        打印一次当前测距状态
-//   w,s      记录“开始测量厚度”的起点（把书放上去之前先按）
-//   w,e      结束测量：厚度 = 起点距离 - 当前距离
-//   w,c      清空统计
+// 串口命令 u：超声波测距（u = Ultrasonic；不能用 w，w 是保存知识库）
+//   u        打印一次当前测距状态
+//   u,s      记录“开始测量厚度”的起点（把书放上去之前先按）
+//   u,e      结束测量：厚度 = 起点距离 - 当前距离
+//   u,c      清空统计
 static void cmdWave(const char *arg) {
     char sub = (arg != nullptr && arg[0] != '\0') ? arg[0] : '\0';
 
@@ -809,7 +815,7 @@ static void cmdWave(const char *arg) {
             Serial.println("测厚: 当前读数无效, 先把书放好再看状态");
             return;
         }
-        Serial.printf("测厚: 已记起点 %u mm, 现在把书放上去, 然后 w,e\n",
+        Serial.printf("测厚: 已记起点 %u mm, 现在把书放上去, 然后 u,e\n",
                       (unsigned)snap.distanceMm);
         return;
     }
@@ -830,7 +836,7 @@ static void cmdWave(const char *arg) {
             xSemaphoreGive(waveMutex);
         }
         if (!ok) {
-            Serial.println("测厚: 没有起点快照或当前读数无效, 先 w,s 再 w,e");
+            Serial.println("测厚: 没有起点快照或当前读数无效, 先 u,s 再 u,e");
             return;
         }
         Serial.printf("测厚: 厚度 = %d mm (容差 ±%d mm)\n", (int)diff,
@@ -855,7 +861,23 @@ static void cmdWave(const char *arg) {
         return;
     }
 
-    Serial.println("测距命令: w 看状态 | w,s 记起点 | w,e 算厚度 | w,c 清统计");
+    Serial.println("测距命令: u 看状态 | u,s 记起点 | u,e 算厚度 | u,c 清统计");
+}
+
+// 串口命令 d：显示排错（屏幕没内容时先敲这个）
+//   d        打印显示诊断：刷屏次数/LVGL 时钟/任务栈余量/缓冲位置/各排错开关
+//   d,1      立刻用 TFT_eSPI 画一次彩条（停留约 1.5 秒，然后自动回到界面）
+//
+// 判读：彩条能出来 -> 屏/背光/接线/SPI 都是好的，问题在 LVGL 这一层
+//       彩条也没有 -> 和 LVGL、字库都无关，查背光/接线/供电/屏型号
+static void cmdDisplay(const char *arg) {
+    if (arg != nullptr && arg[0] == '1') {
+        display.requestRawTest(CFG_SELFTEST_BAR_HOLD_MS);
+        Serial.printf("显示: 已请求彩条自检(停留 %dms, 由显示任务执行, 之后自动回界面)\n",
+                      CFG_SELFTEST_BAR_HOLD_MS);
+        return;
+    }
+    display.printDiag();
 }
 
 // =============================================================================

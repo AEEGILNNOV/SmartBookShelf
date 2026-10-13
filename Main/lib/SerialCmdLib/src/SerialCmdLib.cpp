@@ -22,12 +22,24 @@ bool SerialCmdLib::begin() {
 }
 
 // 注册命令：cmd 统一转大写，回调不能为空
+// ⚠️ 同一个字母注册两次会被前一条遮蔽（dispatch 只认第一个匹配），
+//    所以这里直接拒绝重复注册并把冲突打到串口——不然会出现
+//    “帮助里有这条命令、敲下去却走了另一条”的怪事。
 bool SerialCmdLib::registerCommand(char cmd, const char *help,
                                    SerialCmdCallback callback) {
     if (callback == nullptr || _itemNum >= CMD_MAX_ITEMS) {
         return false;
     }
     char upper = (char)toupper((unsigned char)cmd);
+
+    for (uint8_t i = 0; i < _itemNum; i++) {
+        if (_items[i].cmd == upper) {
+            Serial.printf("串口命令库: 命令 '%c' 重复注册, 已忽略后一条 [%s]\n",
+                          upper, help != nullptr ? help : "");
+            return false;
+        }
+    }
+
     _items[_itemNum].cmd = upper;
     _items[_itemNum].help = help;
     _items[_itemNum].callback = callback;
@@ -131,8 +143,11 @@ void SerialCmdLib::serialCmdTaskEntry(void *pvParameters) {
 }
 
 bool SerialCmdLib::startTask() {
-    BaseType_t ret = xTaskCreatePinnedToCore(serialCmdTaskEntry, "serialcmd",
-                                            4096, this, 1, nullptr, 0);
+    // 栈/优先级/核心都在 config.h 里（CFG_STACK_CMD / CFG_PRIO_CMD / CFG_CORE_CMD），
+    // 不在这里写死数字，改配置只改 config.h。
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        serialCmdTaskEntry, "serialcmd", CFG_STACK_CMD, this, CFG_PRIO_CMD,
+        nullptr, CFG_CORE_CMD);
     if (ret != pdPASS) {
         Serial.println("串口命令库: 任务创建失败");
         return false;

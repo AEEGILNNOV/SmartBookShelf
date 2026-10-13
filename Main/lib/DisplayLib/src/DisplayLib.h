@@ -76,6 +76,13 @@ public:
     void nextPage();
     uint8_t page() const;
 
+    // ---- 屏幕排错（串口命令 d）----
+    // 打印诊断：刷屏次数 / LVGL 时钟 / 显示任务栈余量 / 缓冲位置 / 各排错开关
+    void printDiag();
+    // 请求一次“纯 TFT_eSPI 彩条”自检：由 displayTask 执行（LVGL 只能一个任务碰），
+    // 停留 holdMs 毫秒后自动让 LVGL 整屏重画，画面自己回来。
+    void requestRawTest(uint32_t holdMs = CFG_SELFTEST_BAR_HOLD_MS);
+
     // 串口帮助里打印页说明
     static void printHelp();
 
@@ -89,6 +96,18 @@ private:
     // 建界面（只在 begin() 里调一次）
     void createUi();
 
+    // 纯 TFT_eSPI 彩条（不经过 LVGL）：用来证明“接线/供电/背光/SPI/驱动型号”是好的
+    void drawRawBars(const char *tag);
+
+    // 处理彩条自检请求 + 执行自检（都在 displayTask 里跑）
+    void handleRawTest();
+    void runRawTest(uint32_t holdMs);
+
+#if CFG_DISPLAY_BRINGUP == 2
+    // 排错模式 2 的纯色块页面（一个字体都不碰）
+    void createColorTestUi();
+#endif
+
     // 三个页面 + 消息页：都只吃快照数据，不读成员变量
     void showStatusPage(const HuskyFrame &f, int16_t bookNum);
     void showSysInfoPage(const SystemInfo &info);
@@ -97,7 +116,8 @@ private:
     void showMessagePage(const char *text);
 
     TFT_eSPI _tft;
-    SemaphoreHandle_t _mutex;
+    SemaphoreHandle_t _mutex;      // 数据锁：保护下面这些快照
+    TaskHandle_t _taskHandle;      // 显示任务句柄（排错打印栈余量用）
 
     HuskyFrame _frame;
     SystemInfo _info;
@@ -112,6 +132,10 @@ private:
     bool _messageActive;
     uint32_t _lastSig;
     bool _sigValid;
+
+    // 彩条自检请求：其它任务只写这两个，displayTask 读并清零（单向标志，不需要锁）
+    volatile bool _rawTestRequest;
+    uint32_t _rawTestHoldMs;
 };
 
 const char *displayLibVersion();

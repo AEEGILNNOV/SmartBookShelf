@@ -75,6 +75,15 @@
 #define LV_USE_TABVIEW 1
 #define LV_USE_THEME_DEFAULT 1
 
+// LVGL 自己的日志：开关在 config.h 的 CFG_LV_LOG_TO_SERIAL（默认 0 = 和原来一样不打印）。
+// 打开后 DisplayLib::begin() 会注册一个回调把日志写到 Serial，
+// 这样像“字体是压缩的但没开解压”“draw buffer 太大”这类告警就能在串口看到。
+#if CFG_LV_LOG_TO_SERIAL
+#define LV_USE_LOG 1
+#define LV_LOG_LEVEL 2   // 0=trace 1=info 2=warn 3=error 4=user 5=none
+#define LV_LOG_PRINTF 0  // 不用 printf（怕走到别的串口），改用回调写 Serial
+#else
 #define LV_USE_LOG 0
+#endif
 
 #endif

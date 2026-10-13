@@ -24,6 +24,17 @@ static lv_disp_drv_t s_dispDrv;
 static lv_color_t *s_buf1 = nullptr;
 static lv_color_t *s_buf2 = nullptr;
 
+//------------------------------------ 排错统计（只给串口命令 d 看） ------------------------------------//
+// 刷屏回调被调了几次、最近一次花了多少微秒。
+// 这两个数是排错的关键证据：
+//   一直是 0        -> LVGL 根本没在刷屏（tick / 缓冲 / 驱动注册的问题）
+//   在涨但屏是黑的  -> 数据已经发出去了，屏自己没反应（背光 / 接线 / 屏型号）
+static volatile uint32_t s_flushCount = 0;
+static volatile uint32_t s_lastFlushUs = 0;
+
+// SPI 总线锁：刷屏回调和“别的任务直接写屏”共用，保证同一时刻只有一个写者
+static SemaphoreHandle_t s_busMutex = nullptr;
+
 //------------------------------------ 界面控件（只在 displayTask 里碰） ------------------------------------//
 static lv_obj_t *s_labelTitle = nullptr;
 static lv_obj_t *s_labelPage = nullptr;
@@ -48,22 +59,50 @@ static lv_obj_t *s_msgLabel = nullptr;
 #define TITLE_H 32
 
 // =============================================================================
-// 内存：优先 PSRAM，失败退回内部 RAM
+// 内存：优先 PSRAM（可用 CFG_LV_BUF_IN_PSRAM 关掉），失败退回内部 RAM
 // =============================================================================
 static void *displayAlloc(size_t size) {
     void *p = nullptr;
+#if CFG_LV_BUF_IN_PSRAM
     if (psramFound()) {
         p = ps_malloc(size);
     }
+#endif
     if (p == nullptr) {
-        p = malloc(size);
+        p = malloc(size);  // 关掉 PSRAM 或 PSRAM 申请失败都走这里
     }
     return p;
 }
 
 // =============================================================================
+// 背光：默认 digitalWrite（和验证过的 TFT_Test 一致）；
+// 需要调亮度时在 config.h 里把 CFG_TFT_BL_USE_LEDC 置 1。
+// =============================================================================
+static void backlightInit() {
+#if CFG_TFT_BL_USE_LEDC
+    ledcSetup(CFG_TFT_BL_LEDC_CHANNEL, CFG_TFT_BL_LEDC_FREQ, 8);
+    ledcAttachPin(PIN_TFT_BL, CFG_TFT_BL_LEDC_CHANNEL);
+    ledcWrite(CFG_TFT_BL_LEDC_CHANNEL, CFG_TFT_BL_LEVEL);
+#else
+    pinMode(PIN_TFT_BL, OUTPUT);
+    digitalWrite(PIN_TFT_BL, TFT_BACKLIGHT_ON ? HIGH : LOW);
+#endif
+}
+
+#if CFG_LV_LOG_TO_SERIAL
+// LVGL 的告警/信息转到 Serial（LV_LOG_PRINTF=0，不用 printf 是怕走错串口）
+static void lvglLogCb(const char *buf) {
+    Serial.print("[LVGL] ");
+    Serial.print(buf);
+}
+#endif
+
+// =============================================================================
 // LVGL 刷屏回调：把 LVGL 画好的区域推给 TFT_eSPI
-// 注意：只有 displayTask 会走到这里，所以不需要额外的总线锁。
+//
+// 加总线锁的原因：现在只有 displayTask 会刷屏，这把锁是“零成本保险”；
+// 以后要加摄像头预览、或别的任务直接写屏（比如串口命令 d,1 的彩条），
+// 两个写者同时动 SPI 就会花屏，所以从第一天就把锁留在这里。
 // =============================================================================
 static void displayFlushCb(lv_disp_drv_t *drv, const lv_area_t *area,
                            lv_color_t *colorP) {
@@ -71,10 +110,23 @@ static void displayFlushCb(lv_disp_drv_t *drv, const lv_area_t *area,
     int32_t w = area->x2 - area->x1 + 1;
     int32_t h = area->y2 - area->y1 + 1;
 
+    // 拿不到锁也要画（宁可花屏也不能整屏不刷），所以不阻塞等待
+    bool locked = (s_busMutex != nullptr) &&
+                  (xSemaphoreTake(s_busMutex, pdMS_TO_TICKS(200)) == pdTRUE);
+
+    uint32_t t0 = micros();
+
     tft->startWrite();
     tft->setAddrWindow(area->x1, area->y1, w, h);
-    tft->pushColors((uint16_t *)&colorP->full, w * h, true);
+    tft->pushColors((uint16_t *)&colorP->full, w * h, CFG_LV_PUSH_SWAP != 0);
     tft->endWrite();
+
+    s_lastFlushUs = micros() - t0;
+    s_flushCount++;
+
+    if (locked) {
+        xSemaphoreGive(s_busMutex);
+    }
 
     lv_disp_flush_ready(drv);
 }
@@ -90,6 +142,7 @@ DisplayLib::DisplayLib() {
     _bookNum = 0;
 
     _mutex = nullptr;
+    _taskHandle = nullptr;
     _page = PAGE_STATUS;
     _dirty = true;
     memset(_message, 0, sizeof(_message));
@@ -97,6 +150,8 @@ DisplayLib::DisplayLib() {
     _messageActive = false;
     _lastSig = 0;
     _sigValid = false;
+    _rawTestRequest = false;
+    _rawTestHoldMs = CFG_SELFTEST_BAR_HOLD_MS;
 }
 
 void DisplayLib::displayTaskEntry(void *pvParameters) {
@@ -105,13 +160,17 @@ void DisplayLib::displayTaskEntry(void *pvParameters) {
 }
 
 // =============================================================================
-// 初始化：屏幕 -> LVGL -> 界面 -> 显示任务
+// 初始化：屏幕 -> 彩条自检 -> LVGL -> 界面 -> 显示任务
+// 排错开关 CFG_DISPLAY_BRINGUP 决定在哪一层停（见 config.h 第 3.1 节）
 // =============================================================================
 bool DisplayLib::begin() {
     if (_mutex == nullptr) {
         _mutex = xSemaphoreCreateMutex();
     }
-    if (_mutex == nullptr) {
+    if (s_busMutex == nullptr) {
+        s_busMutex = xSemaphoreCreateMutex();
+    }
+    if (_mutex == nullptr || s_busMutex == nullptr) {
         Serial.println("显示库: 互斥锁创建失败");
         return false;
     }
@@ -123,12 +182,50 @@ bool DisplayLib::begin() {
     _tft.fillScreen(TFT_BLACK);
 
     // 背光：TFT_eSPI 只在部分驱动里自动初始化 TFT_BL，这里显式做一次。
-    // 亮度用 LEDC 控制，别把 BL 直接接 VCC（config.h 的 CFG_TFT_BL_LEVEL 可调）。
-    pinMode(PIN_TFT_BL, OUTPUT);
-    digitalWrite(PIN_TFT_BL, TFT_BACKLIGHT_ON);
+    // 默认 digitalWrite（和验证过的 TFT_Test 一致）；要调亮度在 config.h 里开 LEDC。
+    backlightInit();
+
+    // ---- 1.5) 排错模式 1：只画彩条，完全不进 LVGL ----
+    // 屏上出现彩条 => 接线/供电/背光/SPI/驱动型号这条链是好的，
+    // 那“整屏没内容”就只可能在 LVGL 这一层，和字库无关。
+#if CFG_DISPLAY_BRINGUP == 1
+    drawRawBars("RAW ONLY");
+    Serial.println("显示库: [排错模式1] 只画了 TFT_eSPI 彩条, 没有初始化 LVGL");
+    Serial.println("  看到彩条 -> 硬件这条链是好的, 问题在 LVGL/刷屏/字库");
+    Serial.println("  看不到   -> 跟 LVGL 和字库都无关, 查背光/接线/供电/屏型号");
+    return true;
+#endif
+
+    // ---- 1.6) 排错模式 2/3：先画一次彩条，再进 LVGL ----
+#if CFG_DISPLAY_BRINGUP >= 2
+    drawRawBars("BRINGUP BARS");
+    vTaskDelay(pdMS_TO_TICKS(CFG_SELFTEST_BAR_HOLD_MS));
+#else
+    // 正常固件：CFG_TFT_SPLASH_MS 默认 0，也就是不画（要一眼确认硬件就在 config.h 里调大）
+    if (CFG_TFT_SPLASH_MS > 0) {
+        drawRawBars("LCD SPLASH");
+        vTaskDelay(pdMS_TO_TICKS(CFG_TFT_SPLASH_MS));
+    }
+#endif
 
     // ---- 2) LVGL ----
     lv_init();
+
+#if CFG_LV_LOG_TO_SERIAL
+    // 打开 LVGL 日志（config.h 的 CFG_LV_LOG_TO_SERIAL）后，它的告警会打到串口
+    lv_log_register_print_cb(lvglLogCb);
+#endif
+
+    // LVGL 的“时钟”就是刷屏的心跳：它不走，lv_timer_handler() 永远不会去刷屏，
+    // 表现就是“串口一切正常、屏上什么都没有”。这里开机就量一次，直接排除这个坑。
+    {
+        uint32_t tick0 = lv_tick_get();
+        delay(20);
+        uint32_t tick1 = lv_tick_get();
+        Serial.printf("显示库: LVGL 时钟 %lu -> %lu (%s)\n", (unsigned long)tick0,
+                      (unsigned long)tick1,
+                      (tick1 != tick0) ? "正常" : "❌没走! 屏永远不会刷新");
+    }
 
     size_t pixels = (size_t)SCR_W * CFG_LV_BUF_LINES;
     s_buf1 = (lv_color_t *)displayAlloc(pixels * sizeof(lv_color_t));
@@ -155,22 +252,98 @@ bool DisplayLib::begin() {
     fontSelfCheck();
 #endif
 
+    // ---- 3) 界面 ----
+#if CFG_DISPLAY_BRINGUP == 2
+    // 排错模式 2：只画纯色块，一个字体都不碰。
+    // 色块能出来 -> LVGL 刷屏链路（tick/flush/字节序）是好的，问题回到字体；
+    // 色块也出不来 -> 问题在 LVGL 刷屏链路，跟字库一点关系都没有。
+    createColorTestUi();
+    Serial.println("显示库: [排错模式2] LVGL 纯色块页 (未加载任何字体)");
+#else
     createUi();
+#endif
 
     _dirty = true;
     _sigValid = false;
 
-    // 建显示任务：LVGL 只有这一个消费者，所以不需要总线锁
-    xTaskCreatePinnedToCore(displayTaskEntry, "display", CFG_STACK_DISPLAY, this,
-                            CFG_PRIO_DISPLAY, nullptr, CFG_CORE_DISPLAY);
+    // 建显示任务：LVGL 只有这一个消费者，所以不需要业务锁
+    BaseType_t created = xTaskCreatePinnedToCore(
+        displayTaskEntry, "display", CFG_STACK_DISPLAY, this, CFG_PRIO_DISPLAY,
+        &_taskHandle, CFG_CORE_DISPLAY);
+    if (created != pdPASS) {
+        Serial.println("显示库: 显示任务创建失败");
+        return false;
+    }
 
     Serial.printf(
         "显示库: ILI9341 %dx%d rotation=%d + LVGL8 已就绪 (缓冲 %uKB x2 %s)\n",
         (int)SCR_W, (int)SCR_H, (int)TFT_ROTATION,
         (unsigned)(pixels * sizeof(lv_color_t) / 1024),
-        psramFound() ? "PSRAM" : "RAM");
+        CFG_LV_BUF_IN_PSRAM ? "PSRAM" : "内部RAM");
     return true;
 }
+
+// =============================================================================
+// 纯 TFT_eSPI 彩条：完全不经过 LVGL
+//
+// 这是整个显示排错的“地基测试”——只要它出得来，
+// 就说明 屏供电/背光/SPI 引脚/CS-DC-RST/驱动型号 全都是对的。
+// =============================================================================
+void DisplayLib::drawRawBars(const char *tag) {
+    static const uint16_t BAR_COLOR[8] = {TFT_RED,  TFT_GREEN,   TFT_BLUE,
+                                          TFT_YELLOW, TFT_CYAN, TFT_MAGENTA,
+                                          TFT_WHITE, TFT_BLACK};
+    int16_t barW = SCR_W / 8;
+
+    bool locked = (s_busMutex != nullptr) &&
+                  (xSemaphoreTake(s_busMutex, pdMS_TO_TICKS(200)) == pdTRUE);
+
+    for (int i = 0; i < 8; i++) {
+        _tft.fillRect(i * barW, 0, barW, SCR_H, BAR_COLOR[i]);
+    }
+
+    // 中间挖一条黑底，写两行 ASCII（TFT_eSPI 内置字体只有英文，正好够用）
+    _tft.fillRect(0, SCR_H / 2 - 24, SCR_W, 48, TFT_BLACK);
+    _tft.setTextDatum(MC_DATUM);
+    _tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    _tft.drawString(tag, SCR_W / 2, SCR_H / 2 - 8, 2);   // 字号 2 = 16px
+    _tft.setTextColor(TFT_GREEN, TFT_BLACK);
+    _tft.drawString("RAW TFT_eSPI OK", SCR_W / 2, SCR_H / 2 + 12, 1);
+    _tft.setTextDatum(TL_DATUM);
+
+    if (locked) {
+        xSemaphoreGive(s_busMutex);
+    }
+}
+
+#if CFG_DISPLAY_BRINGUP == 2
+// =============================================================================
+// 排错模式 2 的页面：纯色块，不用任何字体
+// =============================================================================
+void DisplayLib::createColorTestUi() {
+    lv_obj_t *scr = lv_scr_act();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0xFF0000), 0);  // 红底
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+
+    lv_obj_t *box = lv_obj_create(scr);                          // 蓝方块
+    lv_obj_set_size(box, SCR_W / 2, SCR_H / 3);
+    lv_obj_align(box, LV_ALIGN_TOP_LEFT, 8, 8);
+    lv_obj_set_style_radius(box, 0, 0);
+    lv_obj_set_style_border_width(box, 0, 0);
+    lv_obj_set_style_bg_color(box, lv_color_hex(0x0000FF), 0);
+    lv_obj_set_style_bg_opa(box, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *box2 = lv_obj_create(scr);                         // 绿方块
+    lv_obj_set_size(box2, SCR_W / 2, SCR_H / 3);
+    lv_obj_align(box2, LV_ALIGN_BOTTOM_RIGHT, -8, -8);
+    lv_obj_set_style_radius(box2, 0, 0);
+    lv_obj_set_style_border_width(box2, 0, 0);
+    lv_obj_set_style_bg_color(box2, lv_color_hex(0x00FF00), 0);
+    lv_obj_set_style_bg_opa(box2, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(box2, LV_OBJ_FLAG_SCROLLABLE);
+}
+#endif
 
 // =============================================================================
 // 建界面（中文用 simsun_16_cjk，英文数字用 montserrat_12）
@@ -353,6 +526,11 @@ void DisplayLib::showMessage(const char *text, uint32_t ms) {
     if (_mutex == nullptr || text == nullptr) {
         return;
     }
+#if CFG_DISPLAY_BRINGUP == 2
+    // 排错模式 2 要保证一个字体都不碰，而消息页用的是中文字库，这里直接忽略
+    (void)ms;
+    return;
+#endif
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         snprintf(_message, sizeof(_message), "%s", text);
         _messageUntil = millis() + ms;
@@ -409,11 +587,97 @@ const char *displayLibVersion() {
 // 显示任务：刷新 + 跑 LVGL 定时器，5ms 一轮
 // =============================================================================
 void DisplayLib::taskLoop() {
+    uint32_t lastLog = 0;
+
     for (;;) {
         update();
+
+        // 串口 d,1 请求的彩条自检：必须在显示任务里画（LVGL 只能一个任务碰）
+        handleRawTest();
+
         lv_timer_handler();
+
+        // 心跳（config.h 的 CFG_DISPLAY_FLUSH_LOG_MS，默认 0 关）：
+        // 把“LVGL 到底有没有刷屏”打成一行串口，这是黑屏排错最直接的证据。
+        if (CFG_DISPLAY_FLUSH_LOG_MS > 0) {
+            uint32_t now = millis();
+            if (now - lastLog >= (uint32_t)CFG_DISPLAY_FLUSH_LOG_MS) {
+                lastLog = now;
+                // ESP-IDF 的 uxTaskGetStackHighWaterMark 单位是字节
+                Serial.printf(
+                    "显示: 刷屏=%lu次 最近一次=%luus LVGL时钟=%lums 栈余量=%u字节\n",
+                    (unsigned long)s_flushCount, (unsigned long)s_lastFlushUs,
+                    (unsigned long)lv_tick_get(),
+                    (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+            }
+        }
+
         vTaskDelay(pdMS_TO_TICKS(CFG_DISPLAY_INTERVAL_MS));
     }
+}
+
+// =============================================================================
+// 彩条自检：串口命令 d,1 用，不用重新烧录就能验证“屏这条链”
+//
+// 流程：加总线锁画彩条 -> 停留 holdMs -> 请求 LVGL 整屏重画（画面自己回来）。
+// 画条和 LVGL 刷屏都在本任务里做，所以不存在两个任务同时写 SPI 的问题。
+// =============================================================================
+void DisplayLib::requestRawTest(uint32_t holdMs) {
+    _rawTestHoldMs = holdMs;
+    _rawTestRequest = true;
+}
+
+void DisplayLib::handleRawTest() {
+    if (!_rawTestRequest) {
+        return;
+    }
+    _rawTestRequest = false;  // 先清标志，免得画的过程中又被置上
+    runRawTest(_rawTestHoldMs);
+}
+
+void DisplayLib::runRawTest(uint32_t holdMs) {
+    drawRawBars("RAW TEST");
+
+    if (holdMs > 0) {
+        vTaskDelay(pdMS_TO_TICKS(holdMs));
+    }
+
+    // 彩条盖住了 LVGL 以为的“已显示内容”，必须整屏重画一次才对得上
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        _sigValid = false;
+        _dirty = true;
+        xSemaphoreGive(_mutex);
+    }
+    lv_obj_invalidate(lv_scr_act());
+}
+
+// =============================================================================
+// 显示诊断（串口命令 d）：把排错要看的数一次性打全
+// =============================================================================
+void DisplayLib::printDiag() {
+    Serial.println("--- 显示诊断 ---");
+    Serial.printf("  刷屏回调: %lu 次, 最近一次 %lu us\n",
+                  (unsigned long)s_flushCount, (unsigned long)s_lastFlushUs);
+    Serial.printf("  LVGL 时钟: %lu ms (millis=%lu)\n",
+                  (unsigned long)lv_tick_get(), (unsigned long)millis());
+    if (_taskHandle != nullptr) {
+        Serial.printf("  显示任务: 已创建, 栈余量 %u 字节\n",
+                      (unsigned)uxTaskGetStackHighWaterMark(_taskHandle));
+    } else {
+        Serial.println("  显示任务: 未创建（排错模式 1 或 begin() 失败）");
+    }
+    Serial.printf("  刷屏缓冲: %d 行 x2, 位置=%s\n", CFG_LV_BUF_LINES,
+                  CFG_LV_BUF_IN_PSRAM ? "PSRAM" : "内部RAM");
+    Serial.printf("  背光: GPIO%d, 方式=%s\n", PIN_TFT_BL,
+                  CFG_TFT_BL_USE_LEDC ? "LEDC(PWM)" : "digitalWrite");
+    Serial.printf("  字节交换 CFG_LV_PUSH_SWAP=%d (配 lv_conf.h 的 LV_COLOR_16_SWAP=%d)\n",
+                  CFG_LV_PUSH_SWAP, LV_COLOR_16_SWAP);
+    Serial.printf("  中文字库: %s\n",
+                  CFG_FONT_CUSTOM_CJK ? "ui_font_16(自建全字库)" : "LVGL 自带 simsun(缺字)");
+    Serial.printf("  排错模式: CFG_DISPLAY_BRINGUP=%d, 开机彩条=%dms\n",
+                  CFG_DISPLAY_BRINGUP, CFG_TFT_SPLASH_MS);
+    Serial.println("  判读: 刷屏次数一直是 0 -> LVGL 没在刷; 在涨但屏黑 -> 屏/背光/接线");
+    Serial.println("  命令 d,1 = 立刻画一次 TFT_eSPI 彩条(约 1.5 秒后自动回界面)");
 }
 
 // =============================================================================
@@ -468,6 +732,12 @@ void DisplayLib::update() {
     if (_mutex == nullptr) {
         return;
     }
+
+#if CFG_DISPLAY_BRINGUP == 2
+    // 排错模式 2：屏幕上只有纯色块，业务控件一个都没建，
+    // 这里必须直接返回，否则会去写空指针。
+    return;
+#endif
 
     // ---- 1) 加锁取快照，马上放锁 ----
     HuskyFrame frame;
