@@ -75,10 +75,12 @@ uint16_t TouchXPT2046::readAxis(uint8_t cmd) {
     return value;
 }
 
-// 读一次触点：多采几次取平均，再按有效窗口过滤“其实没人按”的情况
-bool TouchXPT2046::read(uint16_t *x, uint16_t *y) {
+// 只读原始值，不做窗口过滤（排线/查芯片有没有回数据用）
+void TouchXPT2046::readRaw(uint16_t *x, uint16_t *y) {
     if (_cs < 0) {
-        return false;
+        *x = 0;
+        *y = 0;
+        return;
     }
 
     uint32_t xs = 0;
@@ -90,8 +92,27 @@ bool TouchXPT2046::read(uint16_t *x, uint16_t *y) {
         ys += readAxis(0x90);  // Y
     }
 
-    uint16_t xa = (uint16_t)(xs / (uint32_t)samples);
-    uint16_t ya = (uint16_t)(ys / (uint32_t)samples);
+    *x = (uint16_t)(xs / (uint32_t)samples);
+    *y = (uint16_t)(ys / (uint32_t)samples);
+}
+
+// T_IRQ 电平：-1 没接，0 LOW（按下），1 HIGH（空闲）
+int TouchXPT2046::irqLevel() {
+    if (_irq < 0) {
+        return -1;
+    }
+    return digitalRead(_irq) == LOW ? 0 : 1;
+}
+
+// 读一次触点：多采几次取平均，再按有效窗口过滤“其实没人按”的情况
+bool TouchXPT2046::read(uint16_t *x, uint16_t *y) {
+    if (_cs < 0) {
+        return false;
+    }
+
+    uint16_t xa = 0;
+    uint16_t ya = 0;
+    readRaw(&xa, &ya);
 
     // 原始值落在窗口外当作“没按”（窗口在 config.h 里调）
     if (xa < CFG_TOUCH_RAW_MIN || xa > CFG_TOUCH_RAW_MAX ||

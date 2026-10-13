@@ -524,7 +524,7 @@ static void registerCommands() {
     //    SerialCmdLib 现在也会拦重复注册并在串口报警。
     cli.registerCommand('u', "超声波测距: u 看状态, u,s 记起点, u,e 算厚度, u,c 清统计",
                         cmdWave);
-    cli.registerCommand('d', "显示诊断: d 状态, d,1 彩条, d,2 SPI测速, d,3 触摸采样, d,4 背光闪, d,5 背光翻转",
+    cli.registerCommand('d', "显示诊断: d 状态, d,1 彩条, d,2 SPI测速, d,3 触摸采样, d,4 背光闪, d,5 背光翻转, d,6 触摸原始值",
                         cmdDisplay);
     cli.registerCommand('t', "触摸测试页(第5页, 页上有按钮做点击计数)", cmdTouch);
 }
@@ -878,6 +878,7 @@ static void cmdWave(const char *arg) {
 //   d,3      触摸原始值采样
 //   d,4      背光闪 3 次（背光不亮时先敲这个：能闪说明 GPIO47/线/灯是通的）
 //   d,5      背光电平对调（少数模块 LED 是低有效，或者线接反了）
+//   d,6      打印触摸原始值（不做窗口过滤，看芯片回的是 0 / 4095 / 真实值）
 //
 // 判读：彩条能出来 -> 屏/背光/接线/SPI 都是好的，问题在 LVGL 这一层
 //       彩条也没有 -> 和 LVGL、字库都无关，查背光/接线/供电/屏型号
@@ -904,6 +905,11 @@ static void cmdDisplay(const char *arg) {
     }
     if (arg != nullptr && arg[0] == '5') {
         display.backlightSet(!display.backlightIsOn());
+        return;
+    }
+    if (arg != nullptr && arg[0] == '6') {
+        display.requestTouchDump();
+        Serial.println("触摸: 已请求打印原始值（由显示任务执行，结果在下面）");
         return;
     }
     display.printDiag();

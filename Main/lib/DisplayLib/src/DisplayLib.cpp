@@ -13,8 +13,8 @@
 // DisplayLib 实现（LVGL 8.4 中文版）
 //
 // 刷新逻辑分三层：
-//   1) 外部任务 setFrame()/setSystemInfo()/… 只写数据并置脏标志；
-//   2) displayTask 里 update() 先加锁取一份快照，立刻放锁；
+//   1) 外部任务 setFrame()/setSystemInfo()/… 只写数据并置脏标志，
+//   2) displayTask 里 update() 先加锁取一份快照，立刻放锁，
 //   3) 拿快照在锁外更新 LVGL 控件（不能占着业务锁），最后 lv_timer_handler()
 //      由 displayTask 统一跑，刷屏回调再把画好的区域推给 TFT_eSPI。
 // 另外用“内容签名”判断内容是否真的变了，没变就不动控件，省 CPU 也不闪屏。
@@ -36,7 +36,7 @@ static volatile uint32_t s_flushCount = 0;
 static volatile uint32_t s_lastFlushUs = 0;
 
 // SPI 总线测速结果：填屏花的时间(us) 和写了多少像素
-// 每像素理论下限 = 16bit / 27MHz ≈ 0.6us；实测只要 > 0.6us/像素 就说明数据真的发出去了。
+// 每像素理论下限 = 16bit / 27MHz ≈ 0.6us，实测只要 > 0.6us/像素 就说明数据真的发出去了。
 // 反过来，如果“填满 240x320”只用了几十微秒，那就是 SPI 根本没在吐数据。
 static uint32_t s_lastBusTestUs = 0;
 static uint32_t s_lastBusTestPx = 0;
@@ -60,7 +60,9 @@ static lv_obj_t *s_msgLabel = nullptr;
 static lv_obj_t *s_touchPanel = nullptr;   // 按钮面板（只在触摸页显示）
 static lv_obj_t *s_btnTest = nullptr;      // 大测试按钮
 static lv_obj_t *s_labelBtn = nullptr;     // 按钮上的字（显示点击次数）
-static lv_obj_t *s_btnReset = nullptr;     // 清零按钮
+static lv_obj_t *s_btnPrev = nullptr;      // 上一页
+static lv_obj_t *s_btnReset = nullptr;     // 清零
+static lv_obj_t *s_btnNext = nullptr;      // 下一页
 static lv_indev_drv_t s_indevDrv;
 
 static bool s_touchPressed = false;        // 当前是否有手指按着
@@ -81,6 +83,9 @@ static uint16_t s_rawMaxY = 0;
 // 触摸驱动：独立 5 根线的位操作 XPT2046（和参考工程同一套），不占屏的 SPI
 static TouchXPT2046 s_touch;
 
+// 屏幕上的按钮回调要用到 DisplayLib 实例（LVGL 的事件回调是普通函数，没有 this）
+static DisplayLib *s_self = nullptr;
+
 //每块 draw buffer 占几行：240 x 40 x 2B = 19.2KB，两块都在 PSRAM。
 //行数由 config.h 的 CFG_LV_BUF_LINES 决定（原 DISPLAY_DRAW_LINES 已合并过去），
 //屏上出现横向撕裂/闪烁时把 CFG_LV_BUF_LINES 往下调到 20。
@@ -94,6 +99,25 @@ static TouchXPT2046 s_touch;
 
 //布局
 #define TITLE_H 32
+
+// =============================================================================
+// 显示/隐藏一个控件：状态没变就不动它
+// 为什么要有这个小函数：lv_obj_add_flag/clear_flag 即使状态没变，也会让那块区域
+// 重画一遍。隐藏的触摸按钮面板有 31KB 像素，每轮刷新都白重画一次，会白白多刷很多次。
+// =============================================================================
+static void objSetHidden(lv_obj_t *obj, bool hidden) {
+    if (obj == nullptr) {
+        return;
+    }
+    if (lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN) == hidden) {
+        return;
+    }
+    if (hidden) {
+        lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_clear_flag(obj, LV_OBJ_FLAG_HIDDEN);
+    }
+}
 
 // =============================================================================
 // 内存：优先 PSRAM（可用 CFG_LV_BUF_IN_PSRAM 关掉），失败退回内部 RAM
@@ -112,14 +136,14 @@ static void *displayAlloc(size_t size) {
 }
 
 // =============================================================================
-// 背光：默认 digitalWrite（和验证过的 TFT_Test 一致）；
+// 背光：默认 digitalWrite（和验证过的 TFT_Test 一致），
 // 需要调亮度时在 config.h 里把 CFG_TFT_BL_USE_LEDC 置 1。
 // 电平方向由 CFG_TFT_BL_ACTIVE_LOW 决定（默认高电平点亮）。
 //
 // 背光不亮时的排查顺序（硬件占大多数）：
-//   1) 串口敲 d,4 让背光闪 3 次：会闪 -> 引脚和线是通的，问题在别处；
+//   1) 串口敲 d,4 让背光闪 3 次：会闪 -> 引脚和线是通的，问题在别处，
 //      不闪 -> 用万用表量 GPIO47 对 GND：约 3.3V 说明引脚在输出，
-//      那就是 LED 线/模块供电/LED 本身的问题；0V 才是主控这边的问题。
+//      那就是 LED 线/模块供电/LED 本身的问题，0V 才是主控这边的问题。
 //   2) 敲 d,5 把电平对调试试（有些模块是低有效）。
 //   3) 确认模块 LED/BL 脚确实接在 GPIO47、且模块 GND 与主控共地。
 // =============================================================================
@@ -156,7 +180,7 @@ static void lvglLogCb(const char *buf) {
 // =============================================================================
 // LVGL 刷屏回调：把 LVGL 画好的区域推给 TFT_eSPI
 //
-// 加总线锁的原因：现在只有 displayTask 会刷屏，这把锁是“零成本保险”；
+// 加总线锁的原因：现在只有 displayTask 会刷屏，这把锁是“零成本保险”，
 // 以后要加摄像头预览、或别的任务直接写屏（比如串口命令 d,1 的彩条），
 // 两个写者同时动 SPI 就会花屏，所以从第一天就把锁留在这里。
 // =============================================================================
@@ -291,6 +315,24 @@ static void onBtnResetClicked(lv_event_t *e) {
     }
     Serial.println("触摸: 计数已清零");
 }
+
+// 上一页 / 下一页：点屏幕就能换页，用来看触摸是不是真的在起作用
+// （翻页本身走和串口命令 n 完全一样的那条路：DisplayLib::prevPage()/nextPage()）
+static void onBtnPrevPage(lv_event_t *e) {
+    (void)e;
+    if (s_self != nullptr) {
+        s_self->prevPage();
+        Serial.printf("触摸: 上一页 -> 第 %u 页\n", (unsigned)s_self->page() + 1);
+    }
+}
+
+static void onBtnNextPage(lv_event_t *e) {
+    (void)e;
+    if (s_self != nullptr) {
+        s_self->nextPage();
+        Serial.printf("触摸: 下一页 -> 第 %u 页\n", (unsigned)s_self->page() + 1);
+    }
+}
 #endif  // CFG_RUN_TOUCH
 
 // =============================================================================
@@ -359,7 +401,7 @@ bool DisplayLib::begin() {
     }
 
     // 背光：TFT_eSPI 只在部分驱动里自动初始化 TFT_BL，这里显式做一次。
-    // 默认 digitalWrite（和验证过的 TFT_Test 一致）；要调亮度在 config.h 里开 LEDC。
+    // 默认 digitalWrite（和验证过的 TFT_Test 一致），要调亮度在 config.h 里开 LEDC。
     // 排错：背光不亮先敲 d,4（闪 3 次）和 d,5（电平对调），见本文件 backlightWrite 上面的注释。
     backlightInit();
     _blOn = true;
@@ -437,6 +479,7 @@ bool DisplayLib::begin() {
 
     // ---- 2.5) 触摸：独立 5 根线的 XPT2046 + 注册成 LVGL 输入设备 ----
     // 这一步以前整个工程都没有，所以就算接好了线也没有任何反应。
+    s_self = this;   // 屏上按钮的事件回调要用到本实例（翻页等）
 #if CFG_RUN_TOUCH
     s_touch.begin(PIN_TOUCH_CS, PIN_TOUCH_IRQ, PIN_TOUCH_CLK, PIN_TOUCH_DIN,
                   PIN_TOUCH_DO);
@@ -444,10 +487,14 @@ bool DisplayLib::begin() {
     s_indevDrv.type = LV_INDEV_TYPE_POINTER;
     s_indevDrv.read_cb = touchReadCb;
     s_indevDrv.scroll_limit = 40;   // 和参考工程一致：手指拖动超过 40px 才算滚动
-    lv_indev_drv_register(&s_indevDrv);
+    lv_indev_t *indev = lv_indev_drv_register(&s_indevDrv);
     s_touch.printConfig();
-    Serial.printf("显示库: 触摸已注册为 LVGL 输入设备 (轮询 %dms), 输入 t 或翻页到第 5 页测按钮\n",
-                  CFG_TOUCH_READ_MS);
+    if (indev == nullptr) {
+        Serial.println("显示库: LVGL 输入设备注册失败（lv_indev_drv_register 返回空）");
+    } else {
+        Serial.printf("显示库: 触摸已注册为 LVGL 输入设备 (轮询 %dms), 敲 t 到第 5 页点按钮\n",
+                      CFG_TOUCH_READ_MS);
+    }
 #elif CFG_ENABLE_TOUCH
     Serial.println("显示库: 触摸引脚没配全（config.h 第 3.2 节的 PIN_TOUCH_*）");
 #else
@@ -457,7 +504,7 @@ bool DisplayLib::begin() {
     // ---- 3) 界面 ----
 #if CFG_DISPLAY_BRINGUP == 2
     // 排错模式 2：只画纯色块，一个字体都不碰。
-    // 色块能出来 -> LVGL 刷屏链路（tick/flush/字节序）是好的，问题回到字体；
+    // 色块能出来 -> LVGL 刷屏链路（tick/flush/字节序）是好的，问题回到字体，
     // 色块也出不来 -> 问题在 LVGL 刷屏链路，跟字库一点关系都没有。
     createColorTestUi();
     Serial.println("显示库: [排错模式2] LVGL 纯色块页 (未加载任何字体)");
@@ -592,7 +639,7 @@ void DisplayLib::createUi() {
     lv_obj_align(s_barValue, LV_ALIGN_BOTTOM_MID, 0, -32);
     lv_bar_set_range(s_barValue, 0, 100);
     lv_bar_set_value(s_barValue, 0, LV_ANIM_OFF);
-    lv_obj_add_flag(s_barValue, LV_OBJ_FLAG_HIDDEN);
+    objSetHidden(s_barValue, true);
 
     // ---- 页脚提示（英文，小字号） ----
     s_labelFooter = lv_label_create(scr);
@@ -627,9 +674,26 @@ void DisplayLib::createUi() {
 }
 
 // =============================================================================
-// 触摸测试页：一个能按的大按钮 + 一个清零按钮（放在正文下方，默认隐藏）
+// 触摸测试页：一个能按的大按钮 + 下一排“上一页 / 清零 / 下一页”
 // 面板在 footer 之后创建，所以它会盖住页脚提示，不用另外处理可见性。
 // =============================================================================
+// 小按钮工厂：三处写法一样，抽一个函数出来，免得复制粘贴改漏一处
+static lv_obj_t *makeTouchButton(lv_obj_t *parent, const char *text, int16_t x,
+                                 uint32_t colorHex) {
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, 66, 34);
+    lv_obj_align(btn, LV_ALIGN_BOTTOM_MID, x, -4);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(colorHex), 0);
+    lv_obj_set_style_radius(btn, 6, 0);
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_obj_set_style_text_font(label, DISPLAY_FONT_CJK, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    return btn;
+}
+
 void DisplayLib::createTouchUi() {
     s_touchPanel = lv_obj_create(lv_scr_act());
     lv_obj_set_size(s_touchPanel, SCR_W - 16, 138);
@@ -645,8 +709,8 @@ void DisplayLib::createTouchUi() {
 
     // 大按钮：手指点得到就行，字用中文字库
     s_btnTest = lv_btn_create(s_touchPanel);
-    lv_obj_set_size(s_btnTest, SCR_W - 44, 72);
-    lv_obj_align(s_btnTest, LV_ALIGN_TOP_MID, 0, 4);
+    lv_obj_set_size(s_btnTest, SCR_W - 44, 58);
+    lv_obj_align(s_btnTest, LV_ALIGN_TOP_MID, 0, 2);
     lv_obj_set_style_bg_color(s_btnTest, lv_color_hex(0x0088FF), 0);
     lv_obj_set_style_radius(s_btnTest, 8, 0);
 
@@ -660,21 +724,16 @@ void DisplayLib::createTouchUi() {
     lv_obj_add_event_cb(s_btnTest, onBtnTestClicked, LV_EVENT_CLICKED, nullptr);
 #endif
 
-    // 清零按钮
-    s_btnReset = lv_btn_create(s_touchPanel);
-    lv_obj_set_size(s_btnReset, 120, 38);
-    lv_obj_align(s_btnReset, LV_ALIGN_BOTTOM_MID, 0, -4);
-    lv_obj_set_style_bg_color(s_btnReset, lv_color_hex(0x607080), 0);
-    lv_obj_set_style_radius(s_btnReset, 6, 0);
-
-    lv_obj_t *labelReset = lv_label_create(s_btnReset);
-    lv_obj_set_style_text_font(labelReset, DISPLAY_FONT_CJK, 0);
-    lv_obj_set_style_text_color(labelReset, lv_color_white(), 0);
-    lv_label_set_text(labelReset, "计数清零");
-    lv_obj_center(labelReset);
+    // 底下一排三个小按钮：上一页 / 清零 / 下一页
+    // 上一页、下一页走的就是串口命令 n / t 用的那两个翻页函数，点一下就能验证触摸是否生效
+    s_btnPrev = makeTouchButton(s_touchPanel, "上一页", -70, 0x0088FF);
+    s_btnReset = makeTouchButton(s_touchPanel, "清零", 0, 0x607080);
+    s_btnNext = makeTouchButton(s_touchPanel, "下一页", 70, 0x0088FF);
 
 #if CFG_RUN_TOUCH
+    lv_obj_add_event_cb(s_btnPrev, onBtnPrevPage, LV_EVENT_CLICKED, nullptr);
     lv_obj_add_event_cb(s_btnReset, onBtnResetClicked, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(s_btnNext, onBtnNextPage, LV_EVENT_CLICKED, nullptr);
 #endif
 }
 
@@ -824,6 +883,19 @@ void DisplayLib::nextPage() {
     }
 }
 
+// 上一页：和 nextPage 对称（触摸页上的“上一页”按钮用它）
+void DisplayLib::prevPage() {
+    if (_mutex == nullptr) {
+        return;
+    }
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        _page = (uint8_t)((_page + PAGE_COUNT - 1) % PAGE_COUNT);
+        _dirty = true;
+        _sigValid = false;
+        xSemaphoreGive(_mutex);
+    }
+}
+
 uint8_t DisplayLib::page() const {
     return _page;
 }
@@ -907,6 +979,12 @@ void DisplayLib::handleSelfTest() {
         return;
     }
 
+    if (req == 6) {
+        // 触摸原始值直接打印（d,6）：不画屏
+        runTouchDump();
+        return;
+    }
+
     // ---- SPI 总线测速 ----
     // 只写顶部 240x40（9600 像素），够算出 us/像素，又不至于长时间盖住画面
     uint32_t us = busWriteTest(false);
@@ -947,7 +1025,7 @@ void DisplayLib::restoreScreenAfterTest() {
 
 // =============================================================================
 // SPI 总线测速：写一块像素并计时（唯一写屏者 = 调用它的任务）
-// fullScreen=true -> fillScreen 240x320；false -> 顶部 240x40 一条
+// fullScreen=true -> fillScreen 240x320，false -> 顶部 240x40 一条
 // =============================================================================
 uint32_t DisplayLib::busWriteTest(bool fullScreen) {
     bool locked = (s_busMutex != nullptr) &&
@@ -1002,7 +1080,7 @@ void DisplayLib::backlightBlink(uint8_t times, uint16_t onMs, uint16_t offMs) {
 
     Serial.println("背光: 闪完了。");
     Serial.println("  会闪 -> GPIO47 和 LED 线是通的，背光不亮是别的原因（比如被盖住的画面）");
-    Serial.println("  一点不闪 -> 量 GPIO47 对 GND 的电压：约3.3V=引脚在输出，查LED线/模块供电；0V=主控这边");
+    Serial.println("  一点不闪 -> 量 GPIO47 对 GND 的电压：约3.3V=引脚在输出，查LED线/模块供电，0V=主控这边");
     Serial.println("  也可以敲 d,5 把电平对调（少数模块 LED 是低有效）");
 }
 
@@ -1195,14 +1273,9 @@ void DisplayLib::update() {
              (unsigned)PAGE_COUNT);
     lv_label_set_text(s_labelPage, pageText);
 
-    // 触摸测试页才显示按钮面板，其它页藏起来（面板在页脚之后建，会盖住页脚）
-    if (s_touchPanel != nullptr) {
-        if (page == PAGE_TOUCH) {
-            lv_obj_clear_flag(s_touchPanel, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(s_touchPanel, LV_OBJ_FLAG_HIDDEN);
-        }
-    }
+    // 触摸测试页才显示按钮面板，其它页藏起来
+    // （用 objSetHidden：状态没变就不动它，避免每轮刷新都让面板区域白重画一次）
+    objSetHidden(s_touchPanel, page != PAGE_TOUCH);
 
     switch (page) {
         case PAGE_SYSINFO:
@@ -1265,7 +1338,7 @@ void DisplayLib::showStatusPage(const HuskyFrame &f, int16_t bookNum) {
              (unsigned long)f.errorCount, recent, (int)bookNum);
 
     lv_label_set_text(s_labelBody, body);
-    lv_obj_add_flag(s_barValue, LV_OBJ_FLAG_HIDDEN);
+    objSetHidden(s_barValue, true);
 }
 
 void DisplayLib::showSysInfoPage(const SystemInfo &info) {
@@ -1293,7 +1366,7 @@ void DisplayLib::showSysInfoPage(const SystemInfo &info) {
 
     // 进度条 = RAM 占用百分比
     lv_bar_set_value(s_barValue, (int32_t)info.ramUsedPct, LV_ANIM_OFF);
-    lv_obj_clear_flag(s_barValue, LV_OBJ_FLAG_HIDDEN);
+    objSetHidden(s_barValue, false);
 }
 
 void DisplayLib::showBooksPage(const BookRecord *books, int16_t bookNum) {
@@ -1323,7 +1396,7 @@ void DisplayLib::showBooksPage(const BookRecord *books, int16_t bookNum) {
     }
 
     lv_label_set_text(s_labelBody, body);
-    lv_obj_add_flag(s_barValue, LV_OBJ_FLAG_HIDDEN);
+    objSetHidden(s_barValue, true);
 }
 
 // 超声波测距页：距离(mm/cm) + 滤波值 + 统计 + 测厚信息
@@ -1375,7 +1448,7 @@ void DisplayLib::showWavePage(const WaveState &wave) {
              (unsigned)wave.minMm, (unsigned)wave.maxMm);
 
     lv_label_set_text(s_labelBody, body);
-    lv_obj_add_flag(s_barValue, LV_OBJ_FLAG_HIDDEN);
+    objSetHidden(s_barValue, true);
 }
 
 void DisplayLib::showMessagePage(const char *text) {
@@ -1420,7 +1493,7 @@ void DisplayLib::showTouchPage() {
 #endif
 
     lv_label_set_text(s_labelBody, body);
-    lv_obj_add_flag(s_barValue, LV_OBJ_FLAG_HIDDEN);
+    objSetHidden(s_barValue, true);
 }
 
 // =============================================================================
@@ -1430,6 +1503,40 @@ void DisplayLib::showTouchPage() {
 // =============================================================================
 void DisplayLib::requestTouchSample() {
     _testRequest = 3;
+}
+
+void DisplayLib::requestTouchDump() {
+    _testRequest = 6;
+}
+
+// 打印触摸原始值（不做窗口过滤）：判断“芯片到底有没有回数据”
+void DisplayLib::runTouchDump() {
+#if !CFG_RUN_TOUCH
+    Serial.println("触摸原始值: 触摸没启用（config.h 第 3.2 节）");
+#else
+    int irq = s_touch.irqLevel();
+    Serial.printf("--- 触摸原始值 4 次采样 (T_IRQ=%s) ---\n",
+                  (irq < 0) ? "未接" : (irq == 0 ? "LOW(有触摸)" : "HIGH(空闲)"));
+    Serial.println("  按住屏幕不放、连着敲几次 d,6：T_IRQ 应该变 LOW，原始值也应该跟着变");
+    for (int i = 0; i < 4; i++) {
+        uint16_t rx = 0;
+        uint16_t ry = 0;
+        s_touch.readRaw(&rx, &ry);
+        int irqNow = s_touch.irqLevel();
+        Serial.printf("  %d: 原始 %u, %u   T_IRQ=%s\n", i + 1, (unsigned)rx,
+                      (unsigned)ry,
+                      (irqNow < 0) ? "未接" : (irqNow == 0 ? "LOW" : "HIGH"));
+        vTaskDelay(pdMS_TO_TICKS(120));
+    }
+    Serial.printf("  有效窗口 %d~%d，当前方向 SWAP=%d INVERT_X=%d INVERT_Y=%d\n",
+                  CFG_TOUCH_RAW_MIN, CFG_TOUCH_RAW_MAX, CFG_TOUCH_SWAP_XY,
+                  CFG_TOUCH_INVERT_X, CFG_TOUCH_INVERT_Y);
+    Serial.println("  判读：");
+    Serial.println("    全是 4095 / 接近 4095 -> T_DO 悬空被上拉，芯片没回数据（查 T_DO 与 T_CS）");
+    Serial.println("    全是 0               -> 数据线被拉低 / 芯片没响应（查接线与模块供电）");
+    Serial.println("    手指按住时数值在变   -> 芯片在回数据，按不到就放宽有效窗口再看 d");
+    Serial.println("    T_IRQ 按住时变 LOW   -> 触摸模块供电和 T_IRQ 接线正常（最省事的确认）");
+#endif
 }
 
 void DisplayLib::runTouchSample() {
@@ -1463,6 +1570,6 @@ void DisplayLib::runTouchSample() {
         Serial.println("  ⚠️ 有轴的范围太小：可能那一轴接错脚，或手指没压到边");
     }
     Serial.println("  判读: 手指横向移动时要是 Y 变化大而 X 几乎不变 -> CFG_TOUCH_SWAP_XY 改 1");
-    Serial.println("        左右反了改 CFG_TOUCH_INVERT_X；上下反了改 CFG_TOUCH_INVERT_Y");
+    Serial.println("        左右反了改 CFG_TOUCH_INVERT_X，上下反了改 CFG_TOUCH_INVERT_Y");
 #endif
 }

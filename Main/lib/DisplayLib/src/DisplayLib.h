@@ -75,6 +75,7 @@ public:
     // 翻页 / 指定页
     void setPage(uint8_t page);
     void nextPage();
+    void prevPage();
     uint8_t page() const;
 
     // ---- 屏幕排错（串口命令 d）----
@@ -87,6 +88,8 @@ public:
     void requestBusTest();
     // 请求一次触摸原始值采样（d,3）：在屏四角各按一下，再敲一次 d,3 会打印极值与轴方向建议
     void requestTouchSample();
+    // 请求打印触摸原始值（d,6）：不做窗口过滤，直接看芯片回的是 0 / 4095 / 真实值
+    void requestTouchDump();
 
     // ---- 背光排错（d,4 / d,5）----
     // 直接开关背光。背光不亮时先用它确认“引脚到底能不能点亮 LED”。
@@ -121,6 +124,7 @@ private:
     void runRawTest(uint32_t holdMs);
     void restoreScreenAfterTest();
     void runTouchSample();
+    void runTouchDump();
 
     // 触摸测试页：建按钮面板 + 刷新页面文字
     void createTouchUi();
