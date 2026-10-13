@@ -1,0 +1,11 @@
+{
+    "name": "buttonlib",
+    "version": "1.0.0",
+    "description": "SmartBookShelf 按键库：移位历史消抖 + 事件队列",
+    "keywords": "button, debounce, esp32",
+    "frameworks": "arduino",
+    "platforms": "espressif32",
+    "build": {
+        "srcDir": "src"
+    }
+}

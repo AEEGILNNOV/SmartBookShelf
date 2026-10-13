@@ -1,0 +1,11 @@
+{
+    "name": "serialcmdlib",
+    "version": "1.0.0",
+    "description": "SmartBookShelf 串口命令行库：行缓冲 + 逗号分参 + 注册式分派",
+    "keywords": "serial, command, cli, esp32",
+    "frameworks": "arduino",
+    "platforms": "espressif32",
+    "build": {
+        "srcDir": "src"
+    }
+}

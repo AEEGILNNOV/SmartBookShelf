@@ -1,0 +1,14 @@
+{
+    "name": "huskylib",
+    "version": "1.0.0",
+    "description": "SmartBookShelf 二哈 HUSKYLENS 2 库：I2C 通信 + 内置 CNN 识别结果读取 + 学习/知识库",
+    "keywords": "huskylens, cnn, ocr, i2c, esp32",
+    "frameworks": "arduino",
+    "platforms": "espressif32",
+    "dependencies": {
+        "DFRobot_HuskylensV2": "*"
+    },
+    "build": {
+        "srcDir": "src"
+    }
+}

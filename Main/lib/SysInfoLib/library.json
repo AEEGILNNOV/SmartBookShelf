@@ -1,0 +1,11 @@
+{
+    "name": "sysinfolib",
+    "version": "1.0.0",
+    "description": "SmartBookShelf 系统信息采集与格式化：RAM / PSRAM / Flash / 运行时间",
+    "keywords": "esp32, sysinfo, memory",
+    "frameworks": "arduino",
+    "platforms": "espressif32",
+    "build": {
+        "srcDir": "src"
+    }
+}

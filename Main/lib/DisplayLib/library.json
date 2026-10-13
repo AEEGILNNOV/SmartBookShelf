@@ -1,0 +1,15 @@
+{
+    "name": "displaylib",
+    "version": "1.0.0",
+    "description": "SmartBookShelf 显示库：ILI9341 + LVGL 8.4 中文界面（状态页/系统信息页/书列表页/消息页）",
+    "keywords": "tft, ili9341, lvgl, display, esp32",
+    "frameworks": "arduino",
+    "platforms": "espressif32",
+    "dependencies": {
+        "bodmer/TFT_eSPI": "2.5.43",
+        "lvgl/lvgl": "8.4.0"
+    },
+    "build": {
+        "srcDir": "src"
+    }
+}
