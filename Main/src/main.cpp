@@ -524,7 +524,7 @@ static void registerCommands() {
     //    SerialCmdLib 现在也会拦重复注册并在串口报警。
     cli.registerCommand('u', "超声波测距: u 看状态, u,s 记起点, u,e 算厚度, u,c 清统计",
                         cmdWave);
-    cli.registerCommand('d', "显示诊断: d 看状态, d,1 彩条, d,2 SPI测速, d,3 触摸采样",
+    cli.registerCommand('d', "显示诊断: d 状态, d,1 彩条, d,2 SPI测速, d,3 触摸采样, d,4 背光闪, d,5 背光翻转",
                         cmdDisplay);
     cli.registerCommand('t', "触摸测试页(第5页, 页上有按钮做点击计数)", cmdTouch);
 }
@@ -872,9 +872,12 @@ static void cmdWave(const char *arg) {
 }
 
 // 串口命令 d：显示排错（屏幕没内容时先敲这个）
-//   d        打印显示诊断：刷屏次数/LVGL 时钟/任务栈余量/缓冲位置/各排错开关
+//   d        打印显示诊断：刷屏次数/LVGL 时钟/任务栈余量/缓冲位置/背光/触摸
 //   d,1      立刻用 TFT_eSPI 画一次彩条（停留约 1.5 秒，然后自动回到界面）
 //   d,2      立刻测一次 SPI 总线速度（看 MCU 到底有没有在往屏上吐像素）
+//   d,3      触摸原始值采样
+//   d,4      背光闪 3 次（背光不亮时先敲这个：能闪说明 GPIO47/线/灯是通的）
+//   d,5      背光电平对调（少数模块 LED 是低有效，或者线接反了）
 //
 // 判读：彩条能出来 -> 屏/背光/接线/SPI 都是好的，问题在 LVGL 这一层
 //       彩条也没有 -> 和 LVGL、字库都无关，查背光/接线/供电/屏型号
@@ -893,6 +896,14 @@ static void cmdDisplay(const char *arg) {
     if (arg != nullptr && arg[0] == '3') {
         display.requestTouchSample();
         Serial.println("触摸: 已请求原始值采样/查看结果（第一次开始采样, 第二次打印结果）");
+        return;
+    }
+    if (arg != nullptr && arg[0] == '4') {
+        display.backlightBlink(3);
+        return;
+    }
+    if (arg != nullptr && arg[0] == '5') {
+        display.backlightSet(!display.backlightIsOn());
         return;
     }
     display.printDiag();

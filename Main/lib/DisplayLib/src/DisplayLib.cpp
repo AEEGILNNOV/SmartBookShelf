@@ -114,16 +114,35 @@ static void *displayAlloc(size_t size) {
 // =============================================================================
 // 背光：默认 digitalWrite（和验证过的 TFT_Test 一致）；
 // 需要调亮度时在 config.h 里把 CFG_TFT_BL_USE_LEDC 置 1。
+// 电平方向由 CFG_TFT_BL_ACTIVE_LOW 决定（默认高电平点亮）。
+//
+// 背光不亮时的排查顺序（硬件占大多数）：
+//   1) 串口敲 d,4 让背光闪 3 次：会闪 -> 引脚和线是通的，问题在别处；
+//      不闪 -> 用万用表量 GPIO47 对 GND：约 3.3V 说明引脚在输出，
+//      那就是 LED 线/模块供电/LED 本身的问题；0V 才是主控这边的问题。
+//   2) 敲 d,5 把电平对调试试（有些模块是低有效）。
+//   3) 确认模块 LED/BL 脚确实接在 GPIO47、且模块 GND 与主控共地。
 // =============================================================================
+static void backlightWrite(bool on) {
+#if CFG_TFT_BL_USE_LEDC
+    ledcWrite(CFG_TFT_BL_LEDC_CHANNEL, on ? CFG_TFT_BL_LEVEL : 0);
+#else
+    bool level = on;
+#if CFG_TFT_BL_ACTIVE_LOW
+    level = !level;
+#endif
+    digitalWrite(PIN_TFT_BL, level ? HIGH : LOW);
+#endif
+}
+
 static void backlightInit() {
 #if CFG_TFT_BL_USE_LEDC
     ledcSetup(CFG_TFT_BL_LEDC_CHANNEL, CFG_TFT_BL_LEDC_FREQ, 8);
     ledcAttachPin(PIN_TFT_BL, CFG_TFT_BL_LEDC_CHANNEL);
-    ledcWrite(CFG_TFT_BL_LEDC_CHANNEL, CFG_TFT_BL_LEVEL);
 #else
     pinMode(PIN_TFT_BL, OUTPUT);
-    digitalWrite(PIN_TFT_BL, TFT_BACKLIGHT_ON ? HIGH : LOW);
 #endif
+    backlightWrite(true);
 }
 
 #if CFG_LV_LOG_TO_SERIAL
@@ -295,6 +314,7 @@ DisplayLib::DisplayLib() {
     _sigValid = false;
     _testRequest = 0;
     _rawTestHoldMs = CFG_SELFTEST_BAR_HOLD_MS;
+    _blOn = true;   // begin() 里 backlightInit() 会把背光打开
 }
 
 void DisplayLib::displayTaskEntry(void *pvParameters) {
@@ -340,7 +360,13 @@ bool DisplayLib::begin() {
 
     // 背光：TFT_eSPI 只在部分驱动里自动初始化 TFT_BL，这里显式做一次。
     // 默认 digitalWrite（和验证过的 TFT_Test 一致）；要调亮度在 config.h 里开 LEDC。
+    // 排错：背光不亮先敲 d,4（闪 3 次）和 d,5（电平对调），见本文件 backlightWrite 上面的注释。
     backlightInit();
+    _blOn = true;
+    Serial.printf("显示库: 背光 GPIO%d 已设为 %s（方式=%s, CFG_TFT_BL_ACTIVE_LOW=%d）\n",
+                  PIN_TFT_BL, "开",
+                  CFG_TFT_BL_USE_LEDC ? "LEDC(PWM)" : "digitalWrite",
+                  CFG_TFT_BL_ACTIVE_LOW);
 
     // ---- 1.5) 排错模式 1：只画彩条，完全不进 LVGL ----
     // 屏上出现彩条 => 接线/供电/背光/SPI/驱动型号这条链是好的，
@@ -944,6 +970,43 @@ uint32_t DisplayLib::busWriteTest(bool fullScreen) {
 }
 
 // =============================================================================
+// 背光排错：直接开关 / 闪烁（串口命令 d,4、d,5 用）
+// =============================================================================
+void DisplayLib::backlightSet(bool on) {
+    backlightWrite(on);
+    _blOn = on;
+
+#if CFG_TFT_BL_ACTIVE_LOW
+    const char *levelText = on ? "LOW" : "HIGH";
+#else
+    const char *levelText = on ? "HIGH" : "LOW";
+#endif
+
+    Serial.printf("背光: GPIO%d 设为 %s (实际电平 %s, 方式 %s, CFG_TFT_BL_ACTIVE_LOW=%d)\n",
+                  PIN_TFT_BL, on ? "开" : "关", levelText,
+                  CFG_TFT_BL_USE_LEDC ? "LEDC(PWM)" : "digitalWrite",
+                  CFG_TFT_BL_ACTIVE_LOW);
+}
+
+void DisplayLib::backlightBlink(uint8_t times, uint16_t onMs, uint16_t offMs) {
+    Serial.printf("背光: 闪烁 %u 次（亮 %ums / 灭 %ums）—— 盯着屏看有没有跟着闪\n",
+                  (unsigned)times, (unsigned)onMs, (unsigned)offMs);
+
+    for (uint8_t i = 0; i < times; i++) {
+        backlightWrite(false);
+        vTaskDelay(pdMS_TO_TICKS(offMs));
+        backlightWrite(true);
+        vTaskDelay(pdMS_TO_TICKS(onMs));
+    }
+    _blOn = true;
+
+    Serial.println("背光: 闪完了。");
+    Serial.println("  会闪 -> GPIO47 和 LED 线是通的，背光不亮是别的原因（比如被盖住的画面）");
+    Serial.println("  一点不闪 -> 量 GPIO47 对 GND 的电压：约3.3V=引脚在输出，查LED线/模块供电；0V=主控这边");
+    Serial.println("  也可以敲 d,5 把电平对调（少数模块 LED 是低有效）");
+}
+
+// =============================================================================
 // 显示诊断（串口命令 d）：把排错要看的数一次性打全
 // =============================================================================
 void DisplayLib::printDiag() {
@@ -966,8 +1029,10 @@ void DisplayLib::printDiag() {
     }
     Serial.printf("  刷屏缓冲: %d 行 x2, 位置=%s\n", CFG_LV_BUF_LINES,
                   CFG_LV_BUF_IN_PSRAM ? "PSRAM" : "内部RAM");
-    Serial.printf("  背光: GPIO%d, 方式=%s\n", PIN_TFT_BL,
-                  CFG_TFT_BL_USE_LEDC ? "LEDC(PWM)" : "digitalWrite");
+    Serial.printf("  背光: GPIO%d, 方式=%s, 电平=%s, 当前=%s\n", PIN_TFT_BL,
+                  CFG_TFT_BL_USE_LEDC ? "LEDC(PWM)" : "digitalWrite",
+                  CFG_TFT_BL_ACTIVE_LOW ? "低电平点亮" : "高电平点亮",
+                  _blOn ? "开" : "关");
     Serial.printf("  字节交换 CFG_LV_PUSH_SWAP=%d (配 lv_conf.h 的 LV_COLOR_16_SWAP=%d)\n",
                   CFG_LV_PUSH_SWAP, LV_COLOR_16_SWAP);
     Serial.printf("  中文字库: %s\n",

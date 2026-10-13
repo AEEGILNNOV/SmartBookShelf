@@ -186,6 +186,15 @@
 #define CFG_TFT_BL_LEDC_FREQ 5000
 #endif
 
+// 背光电平：
+//   0 = 高电平点亮（默认，和 TFT_eSPI 的 TFT_BACKLIGHT_ON=1 一致）
+//   1 = 低电平点亮（少数模块的 LED 是低有效，或者 BL 线接到了反相驱动）
+// 怎么判断：串口敲 d,4 让背光闪 3 次——如果“关”的时候亮、“开”的时候灭，
+//           就把这里改成 1；也可以直接敲 d,5 现场对调电平看哪个亮。
+#ifndef CFG_TFT_BL_ACTIVE_LOW
+#define CFG_TFT_BL_ACTIVE_LOW 0
+#endif
+
 // LVGL 刷屏缓冲：2 块 240x40 的 16 位缓冲 ≈ 19.2KB
 // 这一项就是 DisplayLib.cpp 里刷屏缓冲的行数（原来叫 DISPLAY_DRAW_LINES，已合并过来）。
 // 屏幕出现横向撕裂/闪烁就往下调到 20；内部 RAM 更紧就往上调到 80。

@@ -88,6 +88,14 @@ public:
     // 请求一次触摸原始值采样（d,3）：在屏四角各按一下，再敲一次 d,3 会打印极值与轴方向建议
     void requestTouchSample();
 
+    // ---- 背光排错（d,4 / d,5）----
+    // 直接开关背光。背光不亮时先用它确认“引脚到底能不能点亮 LED”。
+    void backlightSet(bool on);
+    // 背光闪烁 times 次（看灯跟不跟着闪）
+    void backlightBlink(uint8_t times, uint16_t onMs = 250, uint16_t offMs = 250);
+    // 目前记录的状态：true = 背光逻辑上开着
+    bool backlightIsOn() const { return _blOn; }
+
     // 串口帮助里打印页说明
     static void printHelp();
 
@@ -149,9 +157,10 @@ private:
     bool _sigValid;
 
     // 自检请求：别的任务只写，displayTask 读并清零（单向标志，不需要加锁）
-    //   0 = 无请求   1 = 彩条自检(_rawTestHoldMs)   2 = SPI 总线测速
+    //   0 = 无请求   1 = 彩条自检(_rawTestHoldMs)   2 = SPI 总线测速   3 = 触摸原始值采样
     volatile uint8_t _testRequest;
     uint32_t _rawTestHoldMs;
+    bool _blOn;   // 背光当前状态（逻辑上的开/关，实际电平可能被 ACTIVE_LOW 翻过）
 };
 
 const char *displayLibVersion();
