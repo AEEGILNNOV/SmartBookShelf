@@ -519,7 +519,7 @@ static void registerCommands() {
     //    SerialCmdLib 现在也会拦重复注册并在串口报警。
     cli.registerCommand('u', "超声波测距: u 看状态, u,s 记起点, u,e 算厚度, u,c 清统计",
                         cmdWave);
-    cli.registerCommand('d', "显示诊断: d 看状态, d,1 画彩条自检", cmdDisplay);
+    cli.registerCommand('d', "显示诊断: d 看状态, d,1 彩条自检, d,2 SPI 测速", cmdDisplay);
 }
 
 // -----------------------------------------------------------------------------
@@ -867,6 +867,7 @@ static void cmdWave(const char *arg) {
 // 串口命令 d：显示排错（屏幕没内容时先敲这个）
 //   d        打印显示诊断：刷屏次数/LVGL 时钟/任务栈余量/缓冲位置/各排错开关
 //   d,1      立刻用 TFT_eSPI 画一次彩条（停留约 1.5 秒，然后自动回到界面）
+//   d,2      立刻测一次 SPI 总线速度（看 MCU 到底有没有在往屏上吐像素）
 //
 // 判读：彩条能出来 -> 屏/背光/接线/SPI 都是好的，问题在 LVGL 这一层
 //       彩条也没有 -> 和 LVGL、字库都无关，查背光/接线/供电/屏型号
@@ -875,6 +876,11 @@ static void cmdDisplay(const char *arg) {
         display.requestRawTest(CFG_SELFTEST_BAR_HOLD_MS);
         Serial.printf("显示: 已请求彩条自检(停留 %dms, 由显示任务执行, 之后自动回界面)\n",
                       CFG_SELFTEST_BAR_HOLD_MS);
+        return;
+    }
+    if (arg != nullptr && arg[0] == '2') {
+        display.requestBusTest();
+        Serial.println("显示: 已请求 SPI 总线测速(由显示任务执行, 结果打印在下面)");
         return;
     }
     display.printDiag();

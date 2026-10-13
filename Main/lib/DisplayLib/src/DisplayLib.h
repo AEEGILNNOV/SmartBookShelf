@@ -82,6 +82,8 @@ public:
     // 请求一次“纯 TFT_eSPI 彩条”自检：由 displayTask 执行（LVGL 只能一个任务碰），
     // 停留 holdMs 毫秒后自动让 LVGL 整屏重画，画面自己回来。
     void requestRawTest(uint32_t holdMs = CFG_SELFTEST_BAR_HOLD_MS);
+    // 请求一次 SPI 总线测速（由 displayTask 执行）：量“MCU 到底有没有在往屏上吐像素”
+    void requestBusTest();
 
     // 串口帮助里打印页说明
     static void printHelp();
@@ -99,9 +101,14 @@ private:
     // 纯 TFT_eSPI 彩条（不经过 LVGL）：用来证明“接线/供电/背光/SPI/驱动型号”是好的
     void drawRawBars(const char *tag);
 
-    // 处理彩条自检请求 + 执行自检（都在 displayTask 里跑）
-    void handleRawTest();
+    // SPI 总线测速：往屏上写一块像素并计时，返回耗时(us)
+    // fullScreen = true 写 240x320（fillScreen），false 只写 240x40 一条
+    uint32_t busWriteTest(bool fullScreen);
+
+    // 处理自检请求 + 执行（都在 displayTask 里跑）
+    void handleSelfTest();
     void runRawTest(uint32_t holdMs);
+    void restoreScreenAfterTest();
 
 #if CFG_DISPLAY_BRINGUP == 2
     // 排错模式 2 的纯色块页面（一个字体都不碰）
@@ -133,8 +140,9 @@ private:
     uint32_t _lastSig;
     bool _sigValid;
 
-    // 彩条自检请求：其它任务只写这两个，displayTask 读并清零（单向标志，不需要锁）
-    volatile bool _rawTestRequest;
+    // 自检请求：别的任务只写，displayTask 读并清零（单向标志，不需要加锁）
+    //   0 = 无请求   1 = 彩条自检(_rawTestHoldMs)   2 = SPI 总线测速
+    volatile uint8_t _testRequest;
     uint32_t _rawTestHoldMs;
 };
 

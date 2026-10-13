@@ -32,6 +32,12 @@ static lv_color_t *s_buf2 = nullptr;
 static volatile uint32_t s_flushCount = 0;
 static volatile uint32_t s_lastFlushUs = 0;
 
+// SPI 总线测速结果：填屏花的时间(us) 和写了多少像素
+// 每像素理论下限 = 16bit / 27MHz ≈ 0.6us；实测只要 > 0.6us/像素 就说明数据真的发出去了。
+// 反过来，如果“填满 240x320”只用了几十微秒，那就是 SPI 根本没在吐数据。
+static uint32_t s_lastBusTestUs = 0;
+static uint32_t s_lastBusTestPx = 0;
+
 // SPI 总线锁：刷屏回调和“别的任务直接写屏”共用，保证同一时刻只有一个写者
 static SemaphoreHandle_t s_busMutex = nullptr;
 
@@ -150,7 +156,7 @@ DisplayLib::DisplayLib() {
     _messageActive = false;
     _lastSig = 0;
     _sigValid = false;
-    _rawTestRequest = false;
+    _testRequest = 0;
     _rawTestHoldMs = CFG_SELFTEST_BAR_HOLD_MS;
 }
 
@@ -179,7 +185,21 @@ bool DisplayLib::begin() {
     s_tft = &_tft;
     _tft.init();
     _tft.setRotation(TFT_ROTATION);
-    _tft.fillScreen(TFT_BLACK);
+
+    // 清屏顺便做一次“SPI 总线测速”：填满 240x320 到底花了多久。
+    // 这是排错最关键的一个数：它不依赖你能不能看见屏，只说明 MCU 有没有把像素吐出去。
+    //   正常：约 0.6~3 us/像素（27MHz 下整屏 50~250ms 都算常见）
+    //   异常：整屏只用几十 us（< 0.1us/像素）-> SPI 根本没在发数据
+    {
+        uint32_t us = busWriteTest(true);
+        uint32_t px = s_lastBusTestPx ? s_lastBusTestPx : 1;
+        uint32_t per100 = us * 100UL / px;  // 每像素耗时 x100，避免用浮点打印
+        Serial.printf("显示库: 清屏(填满 %dx%d) 耗时 %luus = %lu.%02luus/像素 (%s)\n",
+                      (int)SCR_W, (int)SCR_H, (unsigned long)us,
+                      (unsigned long)(per100 / 100UL),
+                      (unsigned long)(per100 % 100UL),
+                      (us * 10UL >= px) ? "SPI 在发数据" : "❌太快! SPI 没在发数据");
+    }
 
     // 背光：TFT_eSPI 只在部分驱动里自动初始化 TFT_BL，这里显式做一次。
     // 默认 digitalWrite（和验证过的 TFT_Test 一致）；要调亮度在 config.h 里开 LEDC。
@@ -593,7 +613,7 @@ void DisplayLib::taskLoop() {
         update();
 
         // 串口 d,1 请求的彩条自检：必须在显示任务里画（LVGL 只能一个任务碰）
-        handleRawTest();
+        handleSelfTest();
 
         lv_timer_handler();
 
@@ -617,22 +637,48 @@ void DisplayLib::taskLoop() {
 }
 
 // =============================================================================
-// 彩条自检：串口命令 d,1 用，不用重新烧录就能验证“屏这条链”
+// 彩条自检 / SPI 总线测速：串口命令 d,1 和 d,2 用，不用重新烧录就能验硬件
 //
-// 流程：加总线锁画彩条 -> 停留 holdMs -> 请求 LVGL 整屏重画（画面自己回来）。
-// 画条和 LVGL 刷屏都在本任务里做，所以不存在两个任务同时写 SPI 的问题。
+// 流程：加总线锁写屏 -> 请求 LVGL 整屏重画（画面自己回来）。
+// 写屏和 LVGL 刷屏都在本任务里做，所以不存在两个任务同时写 SPI 的问题。
 // =============================================================================
 void DisplayLib::requestRawTest(uint32_t holdMs) {
     _rawTestHoldMs = holdMs;
-    _rawTestRequest = true;
+    _testRequest = 1;
 }
 
-void DisplayLib::handleRawTest() {
-    if (!_rawTestRequest) {
+void DisplayLib::requestBusTest() {
+    _testRequest = 2;
+}
+
+void DisplayLib::handleSelfTest() {
+    uint8_t req = _testRequest;
+    if (req == 0) {
         return;
     }
-    _rawTestRequest = false;  // 先清标志，免得画的过程中又被置上
-    runRawTest(_rawTestHoldMs);
+    _testRequest = 0;  // 先清标志，免得测的过程中又被置上
+
+    if (req == 1) {
+        runRawTest(_rawTestHoldMs);
+        return;
+    }
+
+    // ---- SPI 总线测速 ----
+    // 只写顶部 240x40（9600 像素），够算出 us/像素，又不至于长时间盖住画面
+    uint32_t us = busWriteTest(false);
+    uint32_t px = s_lastBusTestPx ? s_lastBusTestPx : 1;
+    uint32_t per100 = us * 100UL / px;
+    Serial.printf("显示: SPI 总线测速 %lu 像素用时 %luus = %lu.%02luus/像素\n",
+                  (unsigned long)px, (unsigned long)us,
+                  (unsigned long)(per100 / 100UL), (unsigned long)(per100 % 100UL));
+    if (us * 10UL >= px) {
+        Serial.println("  -> SPI 确实在往屏上吐数据（问题在屏/背光/接线，不在软件刷屏）");
+    } else {
+        Serial.println("  -> ❌ 太快了，SPI 根本没在发数据（查 platformio.ini 的 "
+                       "USER_SETUP/USE_FSPI_PORT 与引脚宏）");
+    }
+
+    restoreScreenAfterTest();
 }
 
 void DisplayLib::runRawTest(uint32_t holdMs) {
@@ -642,7 +688,11 @@ void DisplayLib::runRawTest(uint32_t holdMs) {
         vTaskDelay(pdMS_TO_TICKS(holdMs));
     }
 
-    // 彩条盖住了 LVGL 以为的“已显示内容”，必须整屏重画一次才对得上
+    restoreScreenAfterTest();
+}
+
+// 自检把画面盖掉之后，让 LVGL 整屏重画一次，画面自己回来
+void DisplayLib::restoreScreenAfterTest() {
     if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         _sigValid = false;
         _dirty = true;
@@ -652,12 +702,42 @@ void DisplayLib::runRawTest(uint32_t holdMs) {
 }
 
 // =============================================================================
+// SPI 总线测速：写一块像素并计时（唯一写屏者 = 调用它的任务）
+// fullScreen=true -> fillScreen 240x320；false -> 顶部 240x40 一条
+// =============================================================================
+uint32_t DisplayLib::busWriteTest(bool fullScreen) {
+    bool locked = (s_busMutex != nullptr) &&
+                  (xSemaphoreTake(s_busMutex, pdMS_TO_TICKS(200)) == pdTRUE);
+
+    uint32_t t0 = micros();
+    if (fullScreen) {
+        _tft.fillScreen(TFT_BLACK);
+        s_lastBusTestPx = (uint32_t)SCR_W * SCR_H;
+    } else {
+        _tft.fillRect(0, 0, SCR_W, CFG_LV_BUF_LINES, TFT_BLACK);
+        s_lastBusTestPx = (uint32_t)SCR_W * CFG_LV_BUF_LINES;
+    }
+    s_lastBusTestUs = micros() - t0;
+
+    if (locked) {
+        xSemaphoreGive(s_busMutex);
+    }
+    return s_lastBusTestUs;
+}
+
+// =============================================================================
 // 显示诊断（串口命令 d）：把排错要看的数一次性打全
 // =============================================================================
 void DisplayLib::printDiag() {
     Serial.println("--- 显示诊断 ---");
     Serial.printf("  刷屏回调: %lu 次, 最近一次 %lu us\n",
                   (unsigned long)s_flushCount, (unsigned long)s_lastFlushUs);
+    if (s_lastBusTestPx > 0) {
+        uint32_t per100 = s_lastBusTestUs * 100UL / s_lastBusTestPx;
+        Serial.printf("  SPI 总线(开机测): %luus / %lu 像素 = %lu.%02luus/像素\n",
+                      (unsigned long)s_lastBusTestUs, (unsigned long)s_lastBusTestPx,
+                      (unsigned long)(per100 / 100UL), (unsigned long)(per100 % 100UL));
+    }
     Serial.printf("  LVGL 时钟: %lu ms (millis=%lu)\n",
                   (unsigned long)lv_tick_get(), (unsigned long)millis());
     if (_taskHandle != nullptr) {
@@ -677,7 +757,7 @@ void DisplayLib::printDiag() {
     Serial.printf("  排错模式: CFG_DISPLAY_BRINGUP=%d, 开机彩条=%dms\n",
                   CFG_DISPLAY_BRINGUP, CFG_TFT_SPLASH_MS);
     Serial.println("  判读: 刷屏次数一直是 0 -> LVGL 没在刷; 在涨但屏黑 -> 屏/背光/接线");
-    Serial.println("  命令 d,1 = 立刻画一次 TFT_eSPI 彩条(约 1.5 秒后自动回界面)");
+    Serial.println("  命令 d,1 = 画一次 TFT_eSPI 彩条; d,2 = 立刻测一次 SPI 总线速度");
 }
 
 // =============================================================================
