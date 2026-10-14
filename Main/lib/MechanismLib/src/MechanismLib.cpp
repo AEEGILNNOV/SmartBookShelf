@@ -682,14 +682,40 @@ bool MechanismLib::jogAllowed(uint8_t axis, int32_t steps, bool allowInvert, boo
 // -----------------------------------------------------------------------------
 void MechanismLib::applyLoadedPosition(int32_t liftSteps, bool positionValid,
                                        bool needHoming) {
+    // =========================================================================
+    // 【为什么这里要分"可信 / 不可信"两条路】
+    //
+    //   取书目标是"相对零点"的**绝对坐标**（下标 x 125，见 main.cpp 的
+    //   calcLiftTargetForIndex），而 Stepper28BYJ::position() 记的是
+    //   "相对上电位置"的步数。加载时如果只把计数清 0、却把位置标成有效，
+    //   两套坐标就错位了：取下标 0 会被算成"已经在位、不用动"，
+    //   而平台实际偏掉的值**正好等于 Flash 里那个历史值**（用户实测偏 250 步）。
+    //   所以可信时必须让"绝对坐标 == 相对计数"。
+    //
+    //   ⚠️⚠️ setPosition() 只改软件计数，**绝不发脉冲、绝不碰 GPIO**。
+    //      它是"告诉软件：机构现在在这里"，不是"把机构开到这里去"。
+    //      开机盲动是明确禁止的（README 第 7 节）。
+    //
+    //   不可信（needHoming 或 positionValid=false，例如上次动作走到一半掉电）时：
+    //   老老实实清 0 + 要求人工归零，绝不拿一个假位置去跑自动取书。
+    // =========================================================================
+    bool trust = positionValid && !needHoming;
+
     if (_lift != nullptr && _lift->isWired()) {
-        _lift->resetPosition();   // 只改软件计数，不发脉冲、不碰 GPIO
+        if (trust) {
+            _lift->setPosition(liftSteps);   // 只改软件计数，不发脉冲、不碰 GPIO
+        } else {
+            _lift->resetPosition();
+        }
     }
     if (_push != nullptr && _push->isWired()) {
-        _push->resetPosition();
+        _push->resetPosition();   // 推书是"一次推一本"，不恢复历史位置
     }
 
-    _positionValid = positionValid;
+    // ⚠️ 位置有效性必须和"需要归零"自洽：需要归零 -> 一定不有效。
+    //    否则万一 Flash 里存成"posok=是 + homing=是"（旧固件/写坏的可能），
+    //    自动取书就会拿着一个不可信的位置去跑，正是本次要防的那类问题。
+    _positionValid = trust;
     _needHoming = needHoming;
     _state = MECH_IDLE;
     _activeAxis = MECH_AXIS_NONE;
@@ -702,8 +728,11 @@ void MechanismLib::applyLoadedPosition(int32_t liftSteps, bool positionValid,
     }
 
     Serial.printf("机械: 从 Flash 加载位置 —— 位置有效=%s, 需要归零=%s",
-                  positionValid ? "是" : "否", needHoming ? "是" : "否");
-    if (liftSteps != 0) {
+                  _positionValid ? "是" : "否", needHoming ? "是" : "否");
+    if (trust) {
+        Serial.printf(" (已按绝对位置恢复 %ld 步: 只改软件计数, 电机没有动)",
+                      (long)liftSteps);
+    } else if (liftSteps != 0) {
         Serial.printf(" (Flash 里记的是 %ld 步, 已按\"当前位置为基准\"清 0)", (long)liftSteps);
     }
     Serial.println();

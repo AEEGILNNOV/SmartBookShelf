@@ -81,6 +81,16 @@ public:
     // 手动归零：把当前位置当作零点
     void resetPosition();
 
+    // ⚠️⚠️ 只改软件计数 _posSteps，**绝不发脉冲、绝不碰 GPIO**。
+    //   语义是"告诉软件：我认为机构现在就在这里"，**不是**"把机构开到这里去"。
+    //   唯一用途：从 Flash 恢复绝对位置（MechanismLib::applyLoadedPosition 里调）。
+    //   为什么需要它：取书目标是"相对零点"的**绝对坐标**（下标 x 125），
+    //   而 position() 记的是"相对上电位置"的计数；加载时若只清 0 不写回，
+    //   两套坐标就错位 —— 取下标 0 会被算成"已在位、不用动"，平台偏掉的值
+    //   正好等于 Flash 里那个历史值。
+    //   ⚠️ 以后想加"让电机走到某处"的接口，请用 run()，不要在这里加脉冲逻辑。
+    void setPosition(int32_t pos);
+
     // 软限位行程：允许 _posSteps 落在 [-range, +range]
     void setRangeSteps(int32_t range);
     int32_t rangeSteps() const;

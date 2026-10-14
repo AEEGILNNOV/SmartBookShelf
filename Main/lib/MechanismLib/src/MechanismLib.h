@@ -156,8 +156,11 @@ public:
     //     applyLoadedPosition() 是**运行中**用户明确执行"从 Flash 加载"时用的，
     //       如果 Flash 里记的是"位置有效且不需要归零"，就把它恢复成有效 ——
     //       否则会出现"q,l 明明加载成功、位置还是无效、存书一直被拒"的怪现象。
-    //   两个都会把当前位置计数清 0（因为机构上电/加载后就在现在这个位置，
-    //   软件只能把"当前"当基准），这一点是开环系统的固有限制。
+    //   ⚠️ 本次修正：位置**可信**时不再清 0，而是用 Stepper28BYJ::setPosition()
+    //      把 Flash 里的绝对步数写回软件计数（只改计数、电机不动）。
+    //      否则"绝对坐标(下标 x 125)"和"相对上电计数"错位，取书会偏
+    //      —— 偏差正好等于 Flash 里那个历史值。
+    //   ⚠️ 只有不可信（needHoming / positionValid=false，如动作中掉电）时才清 0 + 要求人工归零。
     void applyLoadedPosition(int32_t liftSteps, bool positionValid, bool needHoming);
 
     // 软限位：单次点动是否会被拦（调试页显示"能不能再走"）

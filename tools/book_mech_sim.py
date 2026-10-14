@@ -122,6 +122,10 @@ class Motor:
     def reset_position(self):
         self.pos_steps = 0
 
+    def set_position(self, pos):
+        """对应 Stepper28BYJ::setPosition()：只改软件计数，不发脉冲、不碰 GPIO。"""
+        self.pos_steps = pos
+
 
 def clamp_to_range(motor, steps):
     """对应 MechanismLib::clampToRange()：夹到软限位允许范围；返回 0 = 已经在边上。"""
@@ -297,6 +301,26 @@ class Mechanism:
         self.state = MECH_IDLE
         self.last_error = ""
         return True
+
+    def apply_loaded_position(self, lift_steps, position_valid, need_homing):
+        """对应 MechanismLib::applyLoadedPosition()。
+        位置可信 -> setPosition() 把 Flash 里的绝对值写回计数（只改计数、电机不动）；
+        不可信   -> 清 0 + 位置无效 + 要求人工归零。
+        ⚠️ 这条"可信就恢复绝对值"就是本次修复：绝对坐标 == 相对计数。"""
+        trust = position_valid and not need_homing
+        if self.lift is not None and self.lift.wired:
+            if trust:
+                self.lift.set_position(lift_steps)
+            else:
+                self.lift.reset_position()
+        if self.push is not None and self.push.wired:
+            self.push.reset_position()          # 推书是"一次推一本"，不恢复历史位置
+        # ⚠️ 需要归零 -> 位置一定不有效（和真代码一致，防 Flash 里 posok/homing 打架）
+        self.position_valid = trust
+        self.need_homing = need_homing
+        self.state = MECH_IDLE
+        self.active_axis = AXIS_NONE
+        self.last_error = "" if not need_homing else "从 Flash 加载：位置需要人工归零"
 # =============================================================================
 # 第三部分：BookDomainLib / BookListLib / StorageLib 校验的等价模型
 # =============================================================================
@@ -625,8 +649,11 @@ def main():
             return self.base + self.offset
 
         def load_from_flash(self, steps):
+            # ⚠️ 本次修正：真代码在"位置可信"时会用 setPosition() 把 Flash 里的
+            #    绝对值写回机构计数，所以这里也要把 mech 设成 steps（位置==步数）。
             self.base = steps
             self.offset = 0
+            self.mech = steps
             self.mech_at_last = self.mech
             self.last_saved = steps
 
@@ -690,6 +717,39 @@ def main():
     check("场景: 再走 125 -> 待写值 = 550", p2.value() == 550, str(p2.value()))
     p2.zero_here()
     check("场景: 归零后待写值 = 0", p2.value() == 0)
+
+    # ---------------- H2. 重启后坐标系对齐（本次修复的核心不变量）----------------
+    print("\n[H2] 重启后坐标系对齐：绝对坐标 == 相对计数")
+    # 修之前：applyLoadedPosition() 把机构计数清 0、却把位置标成有效，
+    #   而取书目标是"相对零点"的绝对坐标（下标 x 125）-> 两套坐标错位。
+    #   用户实测偏 250 步（2 本书）：取下标 0 时目标=0、计数=0 -> 软件以为"已在位"。
+    lift3 = Motor(CFG_STEPPER_LIFT_RANGE_STEPS)
+    mech3 = Mechanism(lift3, Motor(CFG_STEPPER_PUSH_RANGE_STEPS))
+    mech3.apply_loaded_position(2 * CFG_LIFT_STEPS_PER_BOOK, True, False)   # Flash 里记着 250 步
+    check("重启后计数器恢复成 Flash 值(位置==步数)",
+          lift3.pos_steps == 2 * CFG_LIFT_STEPS_PER_BOOK, str(lift3.pos_steps))
+    check("重启后位置仍然有效、不需要归零", mech3.position_valid and not mech3.need_homing)
+    # 核心不变量：取下标 2 -> 目标 250，正好等于当前位置 -> delta 必须是 0，平台不动
+    check("重启后取下标2: moveLiftTo 被接受", mech3.move_lift_to(2 * CFG_LIFT_STEPS_PER_BOOK))
+    check("重启后取下标2: delta=0, 平台一步都没动",
+          lift3.pos_steps == 2 * CFG_LIFT_STEPS_PER_BOOK and not lift3.moving,
+          str(lift3.pos_steps))
+    # 反例：旧行为（加载后计数被清 0）会让这次取书多走 250 步 —— 这就是被修掉的 bug
+    lift_old = Motor(CFG_STEPPER_LIFT_RANGE_STEPS)
+    mech_old = Mechanism(lift_old, Motor(CFG_STEPPER_PUSH_RANGE_STEPS))
+    lift_old.pos_steps = 0            # 模拟旧行为：加载后计数被清 0
+    mech_old.position_valid = True
+    mech_old.need_homing = False
+    check("旧行为(计数清0)会让取下标2多走 250 步",
+          mech_old.move_lift_to(2 * CFG_LIFT_STEPS_PER_BOOK) and lift_old.steps_left != 0,
+          str(lift_old.steps_left))
+    # 不可信路径：上次是动作走到一半掉电 -> 清 0 + 位置无效 + 拒绝自动取书
+    lift5 = Motor(CFG_STEPPER_LIFT_RANGE_STEPS)
+    mech5 = Mechanism(lift5, Motor(CFG_STEPPER_PUSH_RANGE_STEPS))
+    mech5.apply_loaded_position(2 * CFG_LIFT_STEPS_PER_BOOK, True, True)    # needHoming=True
+    check("动作中掉电 -> 计数清 0 + 位置无效 + 需要归零",
+          lift5.pos_steps == 0 and (not mech5.position_valid) and mech5.need_homing)
+    check("动作中掉电 -> 自动取书被拒绝", not mech5.move_lift_to(0))
 
     # ---------------- 汇总 ----------------
     print("")

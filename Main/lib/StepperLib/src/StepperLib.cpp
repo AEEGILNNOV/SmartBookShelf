@@ -151,6 +151,12 @@ void Stepper28BYJ::resetPosition() {
     _posSteps = 0;
 }
 
+// ⚠️ 只改软件计数：不发脉冲、不碰 GPIO、不改 _stepsLeft、不改 _moving。
+//    语义是"告诉软件：机构现在在这里"，不是"把机构开到这里" —— 见 .h 里的说明。
+void Stepper28BYJ::setPosition(int32_t pos) {
+    _posSteps = pos;
+}
+
 void Stepper28BYJ::setRangeSteps(int32_t range) {
     _rangeSteps = (range < 0) ? -range : range;
 }
