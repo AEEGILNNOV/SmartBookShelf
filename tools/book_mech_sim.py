@@ -38,7 +38,7 @@ CFG_LIFT_STEPS_PER_BOOK      = 125
 CFG_LIFT_INDEX0_OFFSET_STEPS = 0
 CFG_LIFT_DIR_SIGN            = 1
 CFG_STORE_DOWN_SIGN          = 1      # 存书后"向下让一本书"的方向
-CFG_PUSH_DIR_SIGN            = 1
+CFG_PUSH_DIR_SIGN            = -1   # 本机实测: 推出 = run() 负数, 拉回 = run() 正数
 CFG_PUSH_OUT_STEPS           = 875
 CFG_STEPPER_LIFT_RANGE_STEPS = 4096
 CFG_STEPPER_PUSH_RANGE_STEPS = 2048

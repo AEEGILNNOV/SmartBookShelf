@@ -348,7 +348,7 @@ LVGL 事件回调(displayTask) --入队--> 调试页内部队列
 | `CFG_PUSH_OUT_STEPS` | 600 | 推书行程（**待标定**） |
 | `CFG_PUSH_RETRACT_STEPS` | 600 | 推书回退步数（只在 `CFG_PUSH_AUTO_RETRACT=1` 时用） |
 | `CFG_PUSH_MAX_MOVE_STEPS` | 2000 | 单次自动推书的最大步数 |
-| `CFG_LIFT_DIR_SIGN` / `CFG_PUSH_DIR_SIGN` | 1 / 1 | 方向符号（**必须实机点动确认**） |
+| `CFG_LIFT_DIR_SIGN` / `CFG_PUSH_DIR_SIGN` | 1 / -1 | 方向符号（实机点动确认：升降上移=正数；推书推出=**负数**，所以 -1） |
 | `CFG_MECH_ACTION_TIMEOUT_MS` | 30000 | 单次动作兜底超时 |
 
 > ⚠️ **28BYJ-48 是开环控制**：没有编码器、没有限位开关。
@@ -855,7 +855,7 @@ g_pendingPosOffset  = 加载之后相对"加载时刻机构位置"的累计位�
 | --- | --- | --- | --- |
 | `CFG_LIFT_DIR_SIGN` | config.h 9.1 | 1 | 调试页小步长点动升降，看"上移"是不是真的往上；不对就改成 -1 |
 | `CFG_STORE_DOWN_SIGN` | config.h 9.1 | 1 | 存书后"向下让一本书"的方向。1 = 向下是 run() 传负数；反了就改 -1 |
-| `CFG_PUSH_DIR_SIGN` | config.h 9.1 | 1 | 同上，"前进"是不是真的推出 |
+| `CFG_PUSH_DIR_SIGN` | config.h 9.1 | -1 | 本机实测：推出 = run() 负数，拉回 = run() 正数 |
 | `CFG_LIFT_STEPS_PER_BOOK` | config.h 9.1 | **125（已确认）** | 实机给出：上下移动一本书 = 125 步 |
 | `CFG_LIFT_STEPS_PER_MM` | config.h 9.1 | 0.0 | 归零点动 1000 步，卡尺量实际毫米数，算 `1000/毫米` |
 | `CFG_STEPPER_LIFT_RANGE_STEPS` | config.h 第 9 节 | 4096 | 量出机构从最底到最顶的总步数，**打八折**填这里 |
