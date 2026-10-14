@@ -1,0 +1,19 @@
+Main: 机械改成两台电机(升降+推书) + 学科一本书 + 机械调试页 + Flash 掉电恢复
+
+- config.h: 统一引脚表(升降4,5,6,7 / 推书15,16,17,21 / 测距5,6 / 触摸48,18,13,14,38)
+  + 机械参数区(第9/9.1/9.2/9.3节) + Flash配置(第10节) + 第14节引脚冲突编译期体检
+  + 识别周期改 5 秒、测距周期改 5 秒(原 300ms / 100ms)
+- 新增 lib/BookDomainLib: 学科分类 ID 1~6 -> 中文名映射(唯一来源)、方案A查重、书堆顺序文本
+- 新增 lib/MechanismLib: 升降+推书两轴互斥非阻塞状态机、软限位、单次上限、急停、人工归零
+- 新增 lib/StorageLib: Preferences/NVS 持久化 + 掉电恢复标记(pend) + 加载数据校验
+- BookListLib: 新增 insertAt()/findById()，支持"新书插到顶部"；重复学科不新增、不累加 count
+- DisplayLib: 新增第6页电机调试页(回调只投队列, 由 stepperTask 执行)；
+  全页面禁止左右滑动(根屏幕不滚动 + 容器显式 LV_DIR_VER)；
+  书单改为 main.cpp 单一数据源(attachBookList/books)
+- main.cpp: 存书/取书流程状态机(取书动作未正常完成时保留原记录)、
+  分类ID连续帧防抖、新增 g(调试页)/v(存书取书)/q(Flash) 三组串口命令
+- tools: 新增 book_mech_sim.py 纯逻辑仿真(63项断言全过)；根目录新增 .gitignore
+
+编译: pio run -e esp32-s3-devkitc-1 => SUCCESS, RAM 8.2% / Flash 12.2%
+
+⚠️ 机械参数(每本书步数/推书行程/软限位/方向符号)全部是待实机标定的保守初值。

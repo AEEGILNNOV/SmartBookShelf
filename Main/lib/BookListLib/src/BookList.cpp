@@ -152,6 +152,79 @@ int16_t BookList::add(const char *text, int16_t id) {
     return index;
 }
 
+// =============================================================================
+// 插到第 index 条的位置
+//
+// 为什么需要它：本次改造规定"新书从顶部放入，所以新书在逻辑书堆里位于最顶部"。
+// 只靠 add() 追加到末尾做不到这一点，所以这里补一个"中间插入"。
+//
+// 实现就是动态数组的标准做法：先把 index 之后的所有元素整体往后挪一格，
+// 再把新记录写到 index 上。挪动是 memmove（有重叠区，必须用 memmove 不能用 memcpy）。
+// =============================================================================
+int16_t BookList::insertAt(int16_t index, int16_t id, const char *text) {
+    if (_mutex == nullptr || _items == nullptr) {
+        return -1;
+    }
+    if (text == nullptr) {
+        text = "";
+    }
+    if (index < 0) {
+        return -1;  // 负下标没有意义，宁可拒绝也不猜
+    }
+
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+        return -1;
+    }
+
+    int16_t result = -1;
+
+    // 插到末尾或越界 -> 直接追加
+    if (index >= _count) {
+        if (grow((int16_t)(_count + 1))) {
+            result = _count;
+            _items[result].id = id;
+            _items[result].count = 1;
+            snprintf(_items[result].text, sizeof(_items[result].text), "%s", text);
+            _count++;
+            _version++;
+        }
+    } else if (grow((int16_t)(_count + 1))) {
+        // 把 [index, _count) 整体往后挪一格，腾出 index 这个位置
+        memmove(&_items[index + 1], &_items[index],
+                sizeof(BookItem) * (size_t)(_count - index));
+
+        result = index;
+        _items[result].id = id;
+        _items[result].count = 1;
+        snprintf(_items[result].text, sizeof(_items[result].text), "%s", text);
+        _count++;
+        _version++;
+    }
+
+    xSemaphoreGive(_mutex);
+    return result;
+}
+
+// 按 id 找下标（每条记录的 id 唯一，所以找到第一个就是它）。
+// 内部的 findByIdOrText 要求"调用前已持锁"，这里自己拿锁，所以不能直接用它。
+int16_t BookList::findById(int16_t id) {
+    if (_mutex == nullptr || _items == nullptr) {
+        return -1;
+    }
+
+    int16_t found = -1;
+    if (xSemaphoreTake(_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+        for (int16_t i = 0; i < _count; i++) {
+            if (_items[i].id == id) {
+                found = i;
+                break;
+            }
+        }
+        xSemaphoreGive(_mutex);
+    }
+    return found;
+}
+
 int16_t BookList::removeAt(int16_t index) {
     if (_mutex == nullptr || _items == nullptr) {
         return -1;

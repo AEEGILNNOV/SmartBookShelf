@@ -68,7 +68,16 @@
 #define CFG_ENABLE_STEPPER 1      // 步进电机（stepperTask）
 #endif
 #ifndef CFG_ENABLE_WAVE
-#define CFG_ENABLE_WAVE 1         // 超声波测距（waveTask）
+// ⚠️ 本次改造默认**关掉**测距，因为 HC-SR04 的 TRIG/ECHO（5,6）和升降电机的
+//    IN1~IN4（4,5,6,7）抢脚，同一时间只能接一个。默认先把两台电机跑通。
+//
+// 想用测距（先做传感器、后做机械时）：
+//   方案一：把这一步的 1 改成 0 之前，先把 CFG_ENABLE_STEPPER 置 0；
+//   方案二（推荐，能同时用）：把测距挪到空闲脚，在 platformio.ini 的 build_flags 里加
+//           -DPIN_WAVE_TRIG=38 -DPIN_WAVE_ECHO=39
+//           然后把这里改成 1。
+// ⚠️ 两个都开着还占同一批 GPIO 的话，第 14.3 节会在编译期直接报错，不会烧进去才发现。
+#define CFG_ENABLE_WAVE 0         // 超声波测距（waveTask）
 #endif
 
 // 以后才做的功能，先留开关占位，默认全关，避免误连不存在的硬件
@@ -283,12 +292,19 @@
 //   · 以前缺的是第 3 步：DisplayLib 从来没有注册 LVGL 输入设备(lv_indev)，
 //     就算读到了坐标，按钮也收不到点击。
 //
-// 【接线（与 LVGLin240320TFTLCD / esp32mouse 参考工程完全一致）】
-//     T_CS  -> GPIO38      T_IRQ -> GPIO39（本工程用轮询，可不接）
-//     T_CLK -> GPIO40      T_DIN -> GPIO41      T_DO -> GPIO42
+// 【接线】
+//     T_CS  -> GPIO48      T_IRQ -> GPIO18（本工程用轮询，可不接）
+//     T_CLK -> GPIO13      T_DIN -> GPIO14      T_DO -> GPIO38
 //
-// ⚠️ **GPIO38/39 同时是步进电机3 的引脚**（CFG_STEPPER_M3_PINS）。电机3 默认关着，
-//    两者只能二选一，同时打开会在编译期直接报错（见本节末尾的体检）。
+// ⚠️ **本次改造把这 5 根脚整个挪过一次**。原因：旧的 38/39/40/41/42 里，
+//    40/41/42 同时是 OV2640 摄像头的 D5/D6/D7，而 38/39 是旧工程"步进电机3(升降平台)"
+//    的 IN1/IN2。本次改造**只用两台电机**（升降 + 推书），旧电机3 整个不要了，
+//    所以 38/39 空出来可以给触摸；再避开摄像头那三根，就是现在这一组：
+//      T_CS=48  T_IRQ=18  T_CLK=13  T_DIN=14  T_DO=38
+//    这几个脚和第 9 节的升降(4,5,6,7)/推书(15,16,17,21) 都不冲突（14.6 节有体检）。
+//
+// ⚠️ 上面这段是"引脚为什么不冲突"的推导，**触摸模块实际接没接、接对没接对，
+//    本工程无法从代码确认**，必须用串口命令 d,3 / d,6 实测（见 README 第 10 节）。
 // -----------------------------------------------------------------------------
 #ifndef CFG_ENABLE_TOUCH
 #define CFG_ENABLE_TOUCH 1        // 1 = 注册 LVGL 输入设备 + 显示触摸测试页
@@ -296,19 +312,19 @@
 
 // 触摸 5 根线（-1 = 这个脚不接）
 #ifndef PIN_TOUCH_CS
-#define PIN_TOUCH_CS 38           // T_CS  片选
+#define PIN_TOUCH_CS 48           // T_CS  片选
 #endif
 #ifndef PIN_TOUCH_IRQ
-#define PIN_TOUCH_IRQ 39          // T_IRQ 中断（可选，轮询方式用不到）
+#define PIN_TOUCH_IRQ 18          // T_IRQ 中断（可选，轮询方式用不到）
 #endif
 #ifndef PIN_TOUCH_CLK
-#define PIN_TOUCH_CLK 40          // T_CLK 时钟
+#define PIN_TOUCH_CLK 13          // T_CLK 时钟
 #endif
 #ifndef PIN_TOUCH_DIN
-#define PIN_TOUCH_DIN 41          // T_DIN 主机输出
+#define PIN_TOUCH_DIN 14          // T_DIN 主机输出
 #endif
 #ifndef PIN_TOUCH_DO
-#define PIN_TOUCH_DO 42           // T_DO  触摸数据回来（相当于 MISO）
+#define PIN_TOUCH_DO 38           // T_DO  触摸数据回来（相当于 MISO）
 #endif
 
 // 原始值有效窗口：落在窗口外当成“没按”。按面板边缘没反应就把窗口放宽。
@@ -381,10 +397,10 @@
 #endif
 
 // ---- 编译期体检 ----
-// 触摸引脚和步进电机3 抢 GPIO38/39：两个都开一定不工作，直接拦下来
-#if CFG_ENABLE_TOUCH && CFG_STEPPER_M3_ENABLE && (PIN_TOUCH_CS == 38 || PIN_TOUCH_IRQ == 39)
-    #error "触摸(T_CS=38/T_IRQ=39) 和步进电机3(38,39,48,21) 抢引脚：把 CFG_STEPPER_M3_ENABLE 或 CFG_ENABLE_TOUCH 关掉一个"
-#endif
+// ⚠️ 本次改造已经把旧的"步进电机3"整个去掉（只用升降 + 推书两台），
+//    触摸引脚也从 38/39/40/41/42 挪到 48/18/13/14/38，
+//    所以这里不再需要"触摸 vs 电机3"的检查。
+//    现在所有引脚冲突检查都集中在**第 14 节**（14.1~14.6），改完引脚请去那里看结论。
 
 // 运行时是否真的启用触摸（编译期常量，条件不满足时整段代码被优化掉）
 #define CFG_RUN_TOUCH (CFG_ENABLE_TOUCH && (PIN_TOUCH_CS >= 0) && (PIN_TOUCH_CLK >= 0) && \
@@ -483,7 +499,7 @@
 
 // 页脚操作提示。改按键定义时同步改这一行（LVGL 只认 ASCII 才会用 montserrat_12）
 #ifndef CFG_FOOTER_HINT
-#define CFG_FOOTER_HINT "k1 next k2 recon k3 learn kA mark kB thick"
+#define CFG_FOOTER_HINT "k1 next k2 recon k3 learn A=store B=take g=debug"
 #endif
 
 // 最多显示（或参与签名比较）几条识别块
@@ -492,10 +508,24 @@
 #endif
 
 
+
+
 // -----------------------------------------------------------------------------
-// 4. HUSKYLENS 2（二哈二代）I2C 内置 CNN / OCR
+#endif
+
+// 4. HUSKYLENS 2（二哈二代）I2C 内置 CNN 分类 / OCR
 //   绿线 SDA -> GPIO1   蓝线 SCL -> GPIO2   VCC=5V/3V3   GND 必须共地
 //   二哈屏幕：系统设置 -> 协议类型 -> I2C
+//
+// 【本次改造要点】需求里"直接使用已经训练好的分类 ID 1~6"，不开发 OCR 关键字匹配。
+//   所以二哈要切到**分类类**算法：
+//     '2' = 物体分类（OBJECT_CLASSIFICATION）
+//     '3' = 自学习分类（SELF_LEARNING_CLASSIFICATION）
+//   这两个算法的结果块里，"分类标签"就是 Result::ID。
+//
+// ⚠️ 千万不要读 Result::classID！Result.h 里 classID 和 xCenter 是**同一个 union 槽位**，
+//    读 classID 等价于读坐标。HuskyLib 已经把它正确暴露成 HuskyWord.id（见 HuskyLib.cpp）；
+//    但要记住：HuskyWord.x 和 classID 是同一块内存，别拿 x 当标签用。
 // -----------------------------------------------------------------------------
 #ifndef PIN_HUSKY_SDA
 #define PIN_HUSKY_SDA 1
@@ -531,12 +561,18 @@
 #define HUSKY_TIMEOUT_MS 800
 #endif
 
-// 识别节拍：一帧 CNN 结果几十毫秒，300ms 一帧够调试用
+// ---- ⚠️ 识别节拍：本次需求要求"正常识别周期 5 秒"，所以这里改成 5000 ----
+// 原来 300ms 一帧。改慢有两个原因：
+//   ① 需求就是 5 秒；
+//   ② 每一帧都去判重/写书单/刷界面既没必要，也容易把"同一本书"当成新书反复处理。
+// 注意区分两个东西：
+//   HUSKY_READ_INTERVAL_MS      = 正常识别周期（5 秒）
+//   HUSKY_RECONNECT_INTERVAL_MS = 掉线后多久重试一次（2 秒，这个要快）
 #ifndef HUSKY_READ_INTERVAL_MS
-#define HUSKY_READ_INTERVAL_MS 300
+#define HUSKY_READ_INTERVAL_MS 5000
 #endif
 
-// 二哈掉线后的重连间隔(ms)
+// 二哈掉线后的重连间隔(ms)。掉线时不能等 5 秒才试一次，否则用户觉得"卡住了"。
 #ifndef HUSKY_RECONNECT_INTERVAL_MS
 #define HUSKY_RECONNECT_INTERVAL_MS 2000
 #endif
@@ -557,8 +593,8 @@
 #endif
 
 // 累计读超时多少次就判一次掉线，走重连流程
-// ⚠️ 目前 recogTask 是按“累计错误数的整数倍”判的（errorCount % HUSKY_ERROR_LIMIT），
-//    不是严格的“连续 N 次”，等接线实测稳定后再按这个宏改成连续计数。
+// ⚠️ 目前 recogTask 是按"累计错误数的整数倍"判的（errorCount % HUSKY_ERROR_LIMIT），
+//    不是严格的"连续 N 次"，等接线实测稳定后再按这个宏改成连续计数。
 #ifndef HUSKY_ERROR_LIMIT
 #define HUSKY_ERROR_LIMIT 3
 #endif
@@ -572,13 +608,17 @@
 // -----------------------------------------------------------------------------
 // 5. 按键
 //
-// ⚠️ 原配置是 40/41/42，但 40/41/42 同时是 OV2640 的 D5/D6/D7，
-//    且和步进电机2（15/16/17/18）不冲突，本工程已把按键挪到 45/46/0。
-// ⚠️ 按键 3 = GPIO0 是 BOOT 脚：芯片复位时若被按下会进下载模式。
-//    正常上电后再按没问题，如果你觉得别扭，改成空闲脚即可：
-//    -DBUTTON_PIN3=48  （或 21/38/39，注意别和电机3冲突）
-// GPIO0 在 DevKitC 上有外部上拉，强烈建议按下为“低电平”：
-//    -DBUTTON_TRUE_VALUE=0
+// 本次改造**没有动按键引脚**（需求明确说不要擅自分配新的实体按键 GPIO）。
+// 按键 1 = 下一页、按键 2 = 重连二哈、按键 3 = 学习当前目标，
+// A/B 两个键本次改成"存书确认 / 取书请求"，见第 9.3 节说明。
+//
+// ⚠️ 保留的已知取舍（原工程就存在，本次不动）：
+//    40/41/42 同时是 OV2640 摄像头的 D5/D6/D7。本次任务范围里没有摄像头，
+//    所以按键继续用 40/41/42；如果以后要同时用"本地摄像头 + 这三个按键"，
+//    必须把其中一个挪脚。
+// ⚠️ 按键 3 = GPIO0 是 BOOT 脚：芯片复位时若被按住会进下载模式（正常上电后再按没问题）。
+//    DevKitC 上 GPIO0 有外部上拉，如果觉得别扭，建议改成按下低电平：
+//    -DBUTTON_PIN3=45 -DBUTTON_TRUE_VALUE=0，或直接换到空闲脚。
 // -----------------------------------------------------------------------------
 #ifndef BUTTON_PIN1
 #define BUTTON_PIN1 45
@@ -590,9 +630,10 @@
 #define BUTTON_PIN3 0
 #endif
 
-// 按键 4 / 5 = 说明书里的 A/B 取书还书键（补齐主控要的 5 个键）。
-// 暂时没接就置 -1，ButtonLib 会跳过这个键。
-// ⚠️ 去掉按键库“只认 3 个键”的限制，是因为产品实际交互是 A/B 两个键 + 3 个功能键。
+// 按键 4 / 5 = 说明书里的 A/B 取书还书键。
+// 本次改造把它们接到"存书确认(A) / 取书请求(B)"上，但**默认仍然是 -1（没接）**：
+// 因为需求要求"不要擅自分配新的实体按键 GPIO"，而且机械还没标定，
+// 自动流程现在也不该跑。要接线就把这两个宏改成实际引脚。
 #ifndef BUTTON_PIN4
 #define BUTTON_PIN4 -1
 #endif
@@ -621,7 +662,7 @@
 #define BUTTON_QUEUE_SIZE 10
 #endif
 
-// 长按判定时间(ms)，给以后做“长按进菜单”留的（当前行为：短按/长按都发按下事件）
+// 长按判定时间(ms)，给以后做"长按进菜单"留的（当前行为：短按/长按都发按下事件）
 #ifndef BUTTON_LONG_PRESS_MS
 #define BUTTON_LONG_PRESS_MS 1000
 #endif
@@ -635,7 +676,8 @@
 #define CMD_LINE_LEN 48
 #endif
 
-// 已注册命令的最大条数
+// 已注册命令的最大条数。⚠️ 本次新增了 g(调试页)/f(Flash)/v(取书存书) 等命令，
+//    原来 32 条够用；如果以后再加命令发现"注册失败"，回头调大这个值。
 #ifndef CMD_MAX_ITEMS
 #define CMD_MAX_ITEMS 32
 #endif
@@ -654,10 +696,12 @@
 // -----------------------------------------------------------------------------
 // 7. 任务节奏 / 优先级 / 栈 / 核心分配
 //
-// ⚠️ 总线独占规则（不要破坏）：
-//   - 只有 DisplayLib 的 displayTask 碰屏幕和 LVGL，
-//   - 只有 HuskyLib 的调用者（recogTask）碰二哈 I2C，
-//   - 只有 StepperLib 的调用者（stepperTask）碰电机引脚。
+// ⚠️ 总线独占规则（**本次改造必须继续守住**）：
+//   - 只有 DisplayLib 的 displayTask 碰屏幕和 LVGL；
+//   - 只有 recogTask 碰二哈 I2C（本工程里 HuskyLib 的唯一调用者）；
+//   - 只有 stepperTask 碰两个电机的 GPIO 和 service()；
+//   - 只有 waveTask 碰 TRIG/ECHO；
+//   - 别的任务只能通过队列/受锁保护的快照传递请求。
 // 想改核心分配，从下面的 CFG_xxx_CORE 宏改，不要散落在 xTaskCreatePinnedToCore。
 // -----------------------------------------------------------------------------
 #ifndef DISPLAY_INTERVAL_MS
@@ -672,14 +716,22 @@
 #ifndef STEPPER_SERVICE_INTERVAL_MS
 #define STEPPER_SERVICE_INTERVAL_MS 2 // 步进任务服务周期（越小越快，越吃 CPU）
 #endif
+
+// ⚠️ 本次需求：HC-SR04 的**正常测量周期是 5 秒**（原来 100ms）。
+//    state 推进周期仍然是 1ms（状态机要密一点才不丢回波），但"发起测量"放慢到 5 秒。
 #ifndef WAVE_MEASURE_INTERVAL_MS
-#define WAVE_MEASURE_INTERVAL_MS 100  // HC-SR04 发起测量的间隔（手册建议 >60ms）
+#define WAVE_MEASURE_INTERVAL_MS 5000
 #endif
 #ifndef WAVE_UPDATE_INTERVAL_MS
 #define WAVE_UPDATE_INTERVAL_MS 1     // 测距状态机推进周期
 #endif
 #ifndef WAVE_PRINT_EVERY
 #define WAVE_PRINT_EVERY 0            // 0 = 不周期打印，只在串口命令里看
+#endif
+
+// 书籍入库任务（bookTask）的节拍(ms)：它只做"请求 -> 等完成 -> 落盘"，不忙等。
+#ifndef CFG_BOOK_TASK_INTERVAL_MS
+#define CFG_BOOK_TASK_INTERVAL_MS 20
 #endif
 
 // 栈大小（字节）
@@ -704,6 +756,9 @@
 #ifndef CFG_STACK_CMD
 #define CFG_STACK_CMD 4096
 #endif
+#ifndef CFG_STACK_BOOK
+#define CFG_STACK_BOOK 6144           // 存书/取书状态机 + 拼中文日志
+#endif
 
 // 优先级（大 = 高）。recog 要保证 I2C 超时不被饿死，所以给 3。
 #ifndef CFG_PRIO_RECOG
@@ -727,9 +782,14 @@
 #ifndef CFG_PRIO_CMD
 #define CFG_PRIO_CMD 1
 #endif
+#ifndef CFG_PRIO_BOOK
+#define CFG_PRIO_BOOK 2            // 比 stepper 低：只发请求和等结果，不抢电机
+#endif
 
 // 核心分配：0 = 协议核（WiFi/蓝牙/LVGL 心跳），1 = 应用核
 // 识别任务独占 I2C，放核心 1，避免被 WiFi 协议栈打断导致 I2C 超时。
+// stepperTask 独占电机引脚，也放核心 1（和 recogTask 时间上互不重叠）。
+// bookTask 只是状态机 + 队列收发，放核心 0，别和电机抢 1 核的时间片。
 #ifndef CFG_CORE_RECOG
 #define CFG_CORE_RECOG 1
 #endif
@@ -751,6 +811,9 @@
 #ifndef CFG_CORE_CMD
 #define CFG_CORE_CMD 0
 #endif
+#ifndef CFG_CORE_BOOK
+#define CFG_CORE_BOOK 0
+#endif
 
 // 主循环 loop() 的延时(ms)：loop 里只做事件转发，不写业务
 #ifndef CFG_LOOP_DELAY_MS
@@ -759,19 +822,34 @@
 
 
 // -----------------------------------------------------------------------------
-// 8. 超声波测距 HC-SR04（Wave_Test 移植进来的非阻塞版本）
+// 8. 超声波测距 HC-SR04（沿用 Wave_Test 移植进来的非阻塞状态机）
 //
-// ⚠️ 引脚冲突：ECHO 规划在 GPIO4，而电机1 的 IN1~IN4 = 4/5/6/7 也用到 4。
-//    同一时间只能接一个：
-//      · 先做测距：保持 TRIG=4 ECHO=5，并把 CFG_ENABLE_STEPPER 置 0，
-//      · 先做电机：把 ECHO 挪到空闲脚（如 -DPIN_WAVE_TRIG=39 -DPIN_WAVE_ECHO=48）。
-// ⚠️ HC-SR04 的 ECHO 输出是 5V，直接接 GPIO 会伤芯片，中间必须分压（1k+2k）。
+// ⚠️ 本次改造把 TRIG/ECHO 从原来的 GPIO4/5 挪到 GPIO5/6，原因有两个：
+//    ① 原来的 GPIO4/5 和升降电机的 IN1~IN4（4,5,6,7）直接抢脚；
+//    ② GPIO4 是 ESP32-S3 的 strapping 脚（上电时决定 VDD_SPI 电压），
+//       TRIG 在复位瞬间被拉高有风险，能避开就避开。
+//
+// ⚠️ 但 TRIG=5、ECHO=6 仍然落在升降电机的 4,5,6,7 里面，**两者还是不能同时接**。
+//    本工程的处理：CFG_ENABLE_WAVE 默认置 0（只用电机），
+//    并且在第 14 节做了编译期体检 —— 谁把两个都打开，编译直接报中文错误。
+//    想同时用：把测距挪到空闲脚，例如
+//      -DPIN_WAVE_TRIG=38 -DPIN_WAVE_ECHO=39  （38/39 现在空着）
+//
+// ⚠️ HC-SR04 的 ECHO 输出是 5V。**必须**在硬件上做电阻分压（1k 串联 + 2k 下拉，
+//    分压后约 3.3V）或者用电平转换模块，再接到 GPIO。
+//    **把软件引脚配成 INPUT 并不能解决 5V 电平问题**，只是把伤芯片的时间往后推。
+//
+// ⚠️ HC-SR04 是"辅助观察书堆位置/机械状态"用的。它**不是**能分辨每次 6mm 位移的
+//    高精度传感器，所以：
+//      · 正常测量周期 = 5 秒（见第 7 节 WAVE_MEASURE_INTERVAL_MS）；
+//      · 测量结果只做显示和辅助校验，**不直接触发机械动作**；
+//      · 距离估算值和升降累计步数**分开保存**，不把估算距离当绝对位置。
 // -----------------------------------------------------------------------------
 #ifndef PIN_WAVE_TRIG
-#define PIN_WAVE_TRIG 4
+#define PIN_WAVE_TRIG 5
 #endif
 #ifndef PIN_WAVE_ECHO
-#define PIN_WAVE_ECHO 5
+#define PIN_WAVE_ECHO 6
 #endif
 
 // 一次测距的超时(us)。量程 4m 时回波约 23ms，给 38ms 宽裕。
@@ -792,7 +870,7 @@
 #define CFG_WAVE_FILTER_N 5
 #endif
 
-// 连续几次无效读数就认为“无目标/没接模块”
+// 连续几次无效读数就认为"无目标/没接模块"
 #ifndef CFG_WAVE_INVALID_LIMIT
 #define CFG_WAVE_INVALID_LIMIT 3
 #endif
@@ -802,51 +880,86 @@
 #define CFG_WAVE_SHOW_ON_SCREEN 1
 #endif
 
+// 相邻两次"有效读数"差多少 mm 以上就认为跳变太大、不可信。
+// 超声波偶尔会读到多路径反射（比如书架侧板），这种读数不能直接拿去改变机械位置。
+// 0 = 不做跳变检查。
+// ⚠️ 待实机标定：先把书堆固定不动，看正常波动（一般 ±5mm 以内），
+//    再把门限设在波动的 2~3 倍。
+#ifndef CFG_WAVE_JUMP_MM
+#define CFG_WAVE_JUMP_MM 80
+#endif
+
 
 // -----------------------------------------------------------------------------
-// 9. 步进电机（28BYJ-48 + ULN2003，宏可切 42 步进 + 丝杆）
+// 9. 机械：两台 28BYJ-48 + ULN2003（本次改造的核心参数区）
 //
-// 机械分工（来自 Model/README.md，不可更改）：
-//   电机1  水平丝杆 -> 推出小车 -> 推书板，沿 Y 前后（推出/退回）
-//   电机2  垂直丝杆 -> 可调中间夹层，改变推出孔高度（对准不同厚度的书）
-//   电机3  垂直丝杆 -> 升降平台，带整摞书沿 Z 升降
+// 【本次机械分工 —— 和旧工程的三台电机设计完全不同，不要再按旧设计写代码】
+//   升降电机(lift)：齿轮齿条带动**整叠书**上下移动，使目标书对准侧壁出书口。
+//   推书电机(push)：齿轮齿条带动水平推书机构，把已经对准出书口的书推出。
 //
-// 【驱动模式】
-//   CFG_STEPPER_DRIVER = 0  -> 28BYJ-48 四相五线，每台 4 个 GPIO 接 ULN2003 的 IN1~IN4
-//   CFG_STEPPER_DRIVER = 1  -> 42 步进 + 驱动器，每台用 STEP/DIR/EN 三个 GPIO（pins[3] 不用）
-// 两种模式共用同一套“步数 + 非阻塞状态机”接口，切模式只改这个宏和引脚表。
+//   ⚠️ 升降电机**不能单独选择书堆内部的某一本书**！
+//      要取第 N 本，必须先把整叠书移到"那一本对准出书口"的高度，再执行水平推出。
 //
-// ⚠️ 电机2(15/16/17/18) 与按键原引脚(40/41/42)不冲突，但电机1(4/5/6/7)
-//    与 HC-SR04 的 TRIG=4/ECHO=5 冲突，见第 8 节。
-// ⚠️ 电机3(38/39/48/21)：38/39/48/21 当前空闲，可接，机械到位前可以先不接线，
-//    只在 CFG_ENABLE_STEPPER 里关掉，或把对应 CFG_STEPPER_M3_ENABLE 置 0。
+// 【旧工程的三台电机（已废弃，仅作历史记录，避免以后再被翻出来）】
+//   旧电机1 水平丝杆 -> 推出小车   |  旧电机2 垂直丝杆 -> 中间夹层
+//   旧电机3 垂直丝杆 -> 升降平台
+//   旧引脚：M1=4,5,6,7   M2=15,16,17,18   M3=38,39,48,21
+//   ⚠️ 旧方案的电机1 引脚(4,5,6,7) 和 HC-SR04 的 TRIG/ECHO 本来就冲突，
+//      而且第三台电机本次根本用不到。所以本次**只保留两个电机轴**：
+//      M1 = 升降，M2 = 推书。旧宏名在第 9 节末尾做兼容映射。
+//
+// 【28BYJ-48 的步数常识（算位置之前必须先想清楚）】
+//   输出轴一圈 = 4096 步（四相八拍，见 StepperLib 注释）。
+//   开环控制：没有编码器、没有限位开关。堵转、失步、齿轮间隙都会让
+//   "软件以为的位置"和"机构的真实位置"越差越多。所以：
+//     · 每本书的步数必须是**实机标定**出来的，不是纸面算出来的；
+//     · 位置有效性靠"人工归零"重新建立（见第 9.2 节）；
+//     · 软限位一定要设，而且宁可保守。
 // -----------------------------------------------------------------------------
 #ifndef CFG_STEPPER_DRIVER
 #define CFG_STEPPER_DRIVER 0
 #endif
 
-// 电机 1：推出小车（沿 Y）
-#ifndef CFG_STEPPER_M1_PINS
-#define CFG_STEPPER_M1_PINS { 4, 5, 6, 7 }
-#endif
-// 电机 2：中间夹层（调推出孔高度）
-#ifndef CFG_STEPPER_M2_PINS
-#define CFG_STEPPER_M2_PINS { 15, 16, 17, 18 }
-#endif
-// 电机 3：升降平台（沿 Z）
-#ifndef CFG_STEPPER_M3_PINS
-#define CFG_STEPPER_M3_PINS { 38, 39, 48, 21 }
+// 升降电机：齿轮齿条带动整叠书上下
+// 4,5,6,7 沿用旧工程里已经验证过能转的那一组，不改线，减少一次接线风险。
+#ifndef CFG_STEPPER_LIFT_PINS
+#define CFG_STEPPER_LIFT_PINS { 4, 5, 6, 7 }
 #endif
 
-// 每台电机单独开关（没接线的一定置 0，否则会白扫引脚）
+// 推书电机：齿轮齿条把书水平推出
+// 旧 M2 的 15,16,17,18 里，18 这次让给触摸中断 T_IRQ，最后一个补到 21。
+// ⚠️ 21 在 ESP32-S3 上同时是默认 I2C 的 SDA，但本工程二哈用的是 GPIO1/2，
+//    所以 21 是空闲的，可以当普通 GPIO 用。
+#ifndef CFG_STEPPER_PUSH_PINS
+#define CFG_STEPPER_PUSH_PINS { 15, 16, 17, 21 }
+#endif
+
+// 两个轴的独立开关。没接线的轴置 0，StepperLib 会跳过它、不碰任何 GPIO。
+#ifndef CFG_STEPPER_LIFT_ENABLE
+#define CFG_STEPPER_LIFT_ENABLE 1
+#endif
+#ifndef CFG_STEPPER_PUSH_ENABLE
+#define CFG_STEPPER_PUSH_ENABLE 1
+#endif
+
+// ---- 旧宏名兼容（老代码/README 里还在用 M1/M2/M3 的说法）----
+// ⚠️ 旧 M2 是"中间夹层"、旧 M3 是"升降平台"，语义和现在**不一样**了。
+//    所以这里只把 M1 映射成升降、M2 映射成推书；
+//    M3 直接映射成"没接线"，防止残留的旧代码真的去驱动一台已经不存在的电机。
+#ifndef CFG_STEPPER_M1_PINS
+#define CFG_STEPPER_M1_PINS CFG_STEPPER_LIFT_PINS
+#endif
+#ifndef CFG_STEPPER_M2_PINS
+#define CFG_STEPPER_M2_PINS CFG_STEPPER_PUSH_PINS
+#endif
 #ifndef CFG_STEPPER_M1_ENABLE
-#define CFG_STEPPER_M1_ENABLE 1
+#define CFG_STEPPER_M1_ENABLE CFG_STEPPER_LIFT_ENABLE
 #endif
 #ifndef CFG_STEPPER_M2_ENABLE
-#define CFG_STEPPER_M2_ENABLE 1
+#define CFG_STEPPER_M2_ENABLE CFG_STEPPER_PUSH_ENABLE
 #endif
 #ifndef CFG_STEPPER_M3_ENABLE
-#define CFG_STEPPER_M3_ENABLE 0
+#define CFG_STEPPER_M3_ENABLE 0    // 旧电机3（升降平台）已废弃：硬关，不让旧代码驱动它
 #endif
 
 // 步进模式：0 = 八拍（半拍，力矩大，更平滑）  1 = 四拍（单四拍，简单）
@@ -877,19 +990,35 @@
 #define CFG_STEPPER_SOFT_LIMIT 1
 #endif
 
-// 软限位行程（步）。28BYJ-48 输出轴一圈 = 4096 步（1:64 减速 + 八拍 8×64×... 见 StepperLib 注释）。
-// 这里按“机构实际行程”填，不知道就先给大一点，等实测再收紧。
-#ifndef CFG_STEPPER_M1_RANGE_STEPS
-#define CFG_STEPPER_M1_RANGE_STEPS 4096
+// 软限位行程（步）。_posSteps 是"相对人工零点的步数"，允许落在 [-range, +range]。
+//
+// ⚠️⚠️ 下面是**待实机标定的保守初值**，不是已经验证过的机械行程！
+//   标定步骤：
+//     ① 先用调试页的小步长(10 步)点动，确认方向对不对；
+//     ② 用中等步长(100 步)慢慢走，量出机构从最底到最顶一共多少步；
+//     ③ 把量到的步数打个八折填到这里（留安全余量），再考虑调大点动步长。
+//   在标定完成之前**不要**执行自动取书/存书，只用调试页点动。
+#ifndef CFG_STEPPER_LIFT_RANGE_STEPS
+#define CFG_STEPPER_LIFT_RANGE_STEPS 4096    // 待标定：升降机构总行程(步)
 #endif
-#ifndef CFG_STEPPER_M2_RANGE_STEPS
-#define CFG_STEPPER_M2_RANGE_STEPS 2048
-#endif
-#ifndef CFG_STEPPER_M3_RANGE_STEPS
-#define CFG_STEPPER_M3_RANGE_STEPS 8192
+#ifndef CFG_STEPPER_PUSH_RANGE_STEPS
+#define CFG_STEPPER_PUSH_RANGE_STEPS 2048    // 待标定：推书机构总行程(步)
 #endif
 
-// 上下电后要不要回零（当前没有限位开关，只能把上电位置当零点）
+// 旧宏名兼容（旧 M1=推出 M2=夹层 M3=升降，语义已变，只给老代码兜底）
+#ifndef CFG_STEPPER_M1_RANGE_STEPS
+#define CFG_STEPPER_M1_RANGE_STEPS CFG_STEPPER_LIFT_RANGE_STEPS
+#endif
+#ifndef CFG_STEPPER_M2_RANGE_STEPS
+#define CFG_STEPPER_M2_RANGE_STEPS CFG_STEPPER_PUSH_RANGE_STEPS
+#endif
+#ifndef CFG_STEPPER_M3_RANGE_STEPS
+#define CFG_STEPPER_M3_RANGE_STEPS 2048
+#endif
+
+// 上下电后要不要回零（当前没有限位开关，只能把上电位置当零点）。
+// ⚠️ **保持 0**：绝对不要在开机时盲目驱动电机去找一个假定的零点。
+//    软件零点靠调试页的"将当前位置设为零点"由人工建立。
 #ifndef CFG_STEPPER_HOMING_ON_BOOT
 #define CFG_STEPPER_HOMING_ON_BOOT 0
 #endif
@@ -905,19 +1034,15 @@
 #define CFG_STEPPER42_LEAD_MM 4.0f         // T8 丝杆导程 4mm/圈
 #endif
 
-// 42 步进驱动器的 EN（使能）脚是否低有效。
-// 常见模块（A4988/DRV8825/TMC 系）都是低有效，所以默认 1，
-// 如果你的模块是高有效，改成 0。
+// 42 步进驱动器的 EN（使能）脚是否低有效（A4988/DRV8825/TMC 系都是低有效）
 #ifndef CFG_STEPPER_EN_ACTIVE_LOW
 #define CFG_STEPPER_EN_ACTIVE_LOW 1
 #endif
 
-// 步进任务/命令队列
+// 步进命令队列长度 / 单条命令最长字符数
 #ifndef CFG_STEPPER_QUEUE_SIZE
 #define CFG_STEPPER_QUEUE_SIZE 8
 #endif
-
-// 单条步进命令最长字符数
 #ifndef CFG_STEPPER_CMD_LEN
 #define CFG_STEPPER_CMD_LEN 32
 #endif
@@ -927,41 +1052,219 @@
 #define CFG_STEPPER_RUN_TIMEOUT_MS 20000
 #endif
 
-
 // -----------------------------------------------------------------------------
-// 10. 记忆/机械关键尺寸（来自 Model/README.md，业务判断门限放这里）
+// 9.1 书籍厚度与升降位置的换算（**全部是要实机标定的参数**）
+//
+// 机械是"齿轮齿条"，真正决定"一本书对应多少步"的是齿条的齿距对应多少步，
+// 不是 28BYJ 转一圈多少步。理论换算是：
+//   齿条模数 m、齿数 z -> 齿轮一圈走 π·m·z 毫米；
+//   电机输出轴一圈 4096 步 -> 每毫米步数 = 4096 / (π·m·z)。
+// 这些机械参数本次没有确认过，所以代码里给两条路：
+//   · CFG_LIFT_STEPS_PER_BOOK：每本书对应的升降步数（**主用，直接标定**）；
+//   · CFG_LIFT_STEPS_PER_MM  ：每毫米对应多少步（理论换算/标定后填）。
+//   两个都填了就以 CFG_LIFT_STEPS_PER_BOOK 为准（更直接、误差更小）。
 // -----------------------------------------------------------------------------
-// 推出孔下沿固定高度(mm)与有效高度范围(mm)
-#ifndef CFG_SLOT_BOTTOM_MM
-#define CFG_SLOT_BOTTOM_MM 380
-#endif
-#ifndef CFG_SLOT_MIN_MM
-#define CFG_SLOT_MIN_MM 18
-#endif
-#ifndef CFG_SLOT_MAX_MM
-#define CFG_SLOT_MAX_MM 53
-#endif
 
-// 推书板高度(mm)，必须 ≤ 最薄书厚度，才能实现单本分离
-#ifndef CFG_PUSHER_HEIGHT_MM
-#define CFG_PUSHER_HEIGHT_MM 14
-#endif
-#ifndef CFG_BOOK_MIN_THICK_MM
-#define CFG_BOOK_MIN_THICK_MM 15
-#endif
-#ifndef CFG_BOOK_MAX_THICK_MM
-#define CFG_BOOK_MAX_THICK_MM 50
-#endif
-
-// 用超声波测厚时的判定容差(mm)
+// 用超声波测厚时（串口命令 u,e）的判定容差(mm)：
+// 算出来的厚度和理论厚度的差超过这个值就提示"厚度异常"。
+// ⚠️ 待实机标定：默认 ±2mm 是沿用旧工程的取值，没在真机上验证过。
 #ifndef CFG_THICK_TOLERANCE_MM
 #define CFG_THICK_TOLERANCE_MM 2
 #endif
 
+// 每本书的理论厚度(mm)，初始估值 6mm。
+// ⚠️ 只用来做粗算和界面显示，不是精确测量值。想更准就用超声波测厚（串口命令 u,e）。
+#ifndef CFG_BOOK_THICK_MM
+#define CFG_BOOK_THICK_MM 6.0f
+#endif
+
+// 升降"每走 1 毫米"对应的步数。
+// ⚠️ 待实机标定。0 = 不用这个参数，改用 CFG_LIFT_STEPS_PER_BOOK。
+//   标定方法：① 人工归零；② 调试页点动 1000 步；③ 卡尺量平台实际走了多少毫米；
+//            ④ 1000 / 实际毫米数，填到这里。
+#ifndef CFG_LIFT_STEPS_PER_MM
+#define CFG_LIFT_STEPS_PER_MM 0.0f
+#endif
+
+// 升降"每本书"对应的步数（**主用参数，必须实机标定**）。
+// ⚠️ 待标定。标定方法：
+//     ① 人工归零；② 书堆只放 1 本书；③ 调试页点动，让这本书对准出书口；
+//     ④ 记下走了多少步，就是"每本书步数"。
+//   未标定前保持这个保守值，并且**不要**开自动取书/存书。
+#ifndef CFG_LIFT_STEPS_PER_BOOK
+#define CFG_LIFT_STEPS_PER_BOOK 200
+#endif
+
+// 数组下标 0（书堆最顶上一本，也就是零点位置那一本）相对零点的步数偏移。
+// 如果"人工归零"时就是把最上面那本对准出书口，这里保持 0。
+#ifndef CFG_LIFT_INDEX0_OFFSET_STEPS
+#define CFG_LIFT_INDEX0_OFFSET_STEPS 0
+#endif
+
+// 单次自动动作允许的最大升降步数（比软限位更早拦住"参数多写一个 0"）
+#ifndef CFG_LIFT_MAX_MOVE_STEPS
+#define CFG_LIFT_MAX_MOVE_STEPS 6000
+#endif
+
+// ---- 推书机构 ----
+
+// 推书行程：把书完全推出需要的步数（**待实机标定**）
+#ifndef CFG_PUSH_OUT_STEPS
+#define CFG_PUSH_OUT_STEPS 600
+#endif
+
+// 推书回退步数。
+// ⚠️ 只有实际机械结构允许（推书板能退回来、且不会把书带回去）才启用。
+//    默认**不回退**（CFG_PUSH_AUTO_RETRACT=0）：推出后由用户把书拿走，推书板停在前面。
+#ifndef CFG_PUSH_AUTO_RETRACT
+#define CFG_PUSH_AUTO_RETRACT 0
+#endif
+#ifndef CFG_PUSH_RETRACT_STEPS
+#define CFG_PUSH_RETRACT_STEPS 600
+#endif
+
+// 单次自动动作允许的最大推书步数
+#ifndef CFG_PUSH_MAX_MOVE_STEPS
+#define CFG_PUSH_MAX_MOVE_STEPS 2000
+#endif
+
+// ---- 方向约定 ----
+// 换相序、齿轮齿条装配方向都会影响"正转到底是往上还是往下"。
+// 这里给两个符号宏，标定时用调试页点动确认后改符号即可，不用改逻辑：
+//   1 = run() 传正数时机构朝"正方向"（升降=向上，推书=推出）
+//  -1 = 反过来
+// ⚠️ 默认值只是按现有接线**假定**的，必须实机点动确认！
+#ifndef CFG_LIFT_DIR_SIGN
+#define CFG_LIFT_DIR_SIGN 1
+#endif
+#ifndef CFG_PUSH_DIR_SIGN
+#define CFG_PUSH_DIR_SIGN 1
+#endif
+
+// 单次动作的兜底超时(ms)。正常情况靠"走完步数"结束；
+// 这里防的是"电机因为某种原因一直 busy"，超时后判动作失败并把位置标记为需要校准。
+#ifndef CFG_MECH_ACTION_TIMEOUT_MS
+#define CFG_MECH_ACTION_TIMEOUT_MS 30000
+#endif
+
+// 机械动作请求队列长度（bookTask / 串口 / 调试页都往这里投）
+#ifndef CFG_MECH_QUEUE_SIZE
+#define CFG_MECH_QUEUE_SIZE 8
+#endif
+
+// 取书结束后是否用超声波读数做一次"辅助校验"。
+// ⚠️ 默认 0（关）：传感器安装几何关系和固定目标距离都还没确认，
+//    盲目用距离判"书到位了"会引入假阳性。等实机标定完再打开。
+#ifndef CFG_MECH_USE_WAVE_CHECK
+#define CFG_MECH_USE_WAVE_CHECK 0
+#endif
+
 
 // -----------------------------------------------------------------------------
-// 11. 与 ESP32-C3 步进控制板的串口链路（预留，暂未接线）
-//     Master 工程规划是 TX=6 RX=7。这里先留宏，等真接线再启用。
+// 9.2 调试界面（第 6 页）的机械点动参数
+//
+// 所有点动都必须走 stepperTask（唯一碰电机引脚的任务），
+// **不能**由 LVGL 事件回调直接操作 GPIO，也不能在显示任务里等电机走完。
+// -----------------------------------------------------------------------------
+// 三档点动步长。改动范围受 CFG_STEPPER_MAX_STEPS 和软限位双重限制。
+#ifndef CFG_DEBUG_JOG_SMALL
+#define CFG_DEBUG_JOG_SMALL 10
+#endif
+#ifndef CFG_DEBUG_JOG_MID
+#define CFG_DEBUG_JOG_MID 100
+#endif
+#ifndef CFG_DEBUG_JOG_LARGE
+#define CFG_DEBUG_JOG_LARGE 500
+#endif
+
+
+// -----------------------------------------------------------------------------
+// 9.3 书籍识别与入库规则（方案 A：每个分类 ID 最多一条记录）
+//
+// ⚠️ 分类 ID 用的是 HuskyWord.id（= 底层 Result::ID），**不是 classID**！
+//    Result.h 里 classID 和 xCenter 是同一个 union 槽位，读 classID 读到的是坐标。
+//    学科映射表在 lib/BookDomainLib 里（getBookNameById()），不在这里写死。
+//
+// 方案 A 的完整规则：
+//   · 分类 ID 必须是 1~6，否则视为无效：不入库，也**不触发任何机械动作**；
+//   · 同一个分类 ID 已经存在时：不新增、不累加数量，只在界面/串口提示"已存在"；
+//   · 新书入库时**插到数组最顶部**（新书从顶部放入，逻辑书堆里也是最新的一本在最顶）。
+//
+// ⚠️ 必须承认的现实限制：
+//   软件只能保证"书单里一个学科只有一条记录"，**无法阻止用户把重复学科的实体书
+//   并且在界面和 README 里把这条限制写清楚，不能假装软件已经拦住了实体书。
+// -----------------------------------------------------------------------------
+//
+// 同一个分类 ID 要**连续几次**识别到才认为"稳定"，防止单帧误判触发入库。
+// 1 = 不防抖（不推荐）；识别周期 5 秒时，3 次约等于连续 15 秒都识别到同一学科。
+// ⚠️ 这个值决定"识别到入库"要等多久，调试时可以改成 2 加快节奏。
+#ifndef CFG_BOOK_CONFIRM_FRAMES
+#define CFG_BOOK_CONFIRM_FRAMES 3
+#endif
+
+// 操作提示/错误文本缓冲（UTF-8 一个汉字 3 字节）
+#ifndef CFG_BOOK_NOTE_LEN
+#define CFG_BOOK_NOTE_LEN 96
+#endif
+
+// 存书/取书状态机的兜底超时(ms)：等机械动作最多等这么久，超时就判失败、保留原记录。
+#ifndef CFG_BOOK_FLOW_TIMEOUT_MS
+#define CFG_BOOK_FLOW_TIMEOUT_MS 40000
+#endif
+
+// 存书流程里"等用户把书放好"的最长时间(ms)。
+//   本次机械**没有**"书已放入"的检测手段（没有对射开关、没有微动开关），
+//   所以**不能虚构自动检测能力**。流程拆成：
+//     识别确认 -> 提示用户放书 -> 用户按确认 -> 才把记录插入书单并落盘。
+//   超时没确认就取消入库（机械位置不动，书单也不改）。
+#ifndef CFG_BOOK_PLACE_TIMEOUT_MS
+#define CFG_BOOK_PLACE_TIMEOUT_MS 60000
+#endif
+
+
+// -----------------------------------------------------------------------------
+// 10. Flash 持久化（Preferences / NVS，用 ESP32-S3 内部 Flash）
+//
+// 为什么用 Preferences：Arduino 框架自带，不需要外部存储芯片，也不需要额外依赖。
+// 保存的内容和校验规则见 lib/StorageLib；这里只放"存哪些、什么时候存"的开关和上限。
+//
+// 【掉电恢复的核心思路（三句话）】
+//   1) 任何会改变机械位置的动作**开始之前**，先往 Flash 写一个"动作未完成"标记；
+//   2) 动作正常结束后，写"动作已完成" + 新的步数；
+//   3) 复位时发现标记还是"未完成" -> 说明上次是断电中断的，把位置判为无效，
+//      **要求人工归零**，在归零之前不允许执行依赖绝对位置的自动取书。
+//   ⚠️ 开机**绝对不要**驱动电机去找一个假定的零点。
+// -----------------------------------------------------------------------------
+// 数据版本号。**改 BookItem 结构或存储布局时必须 +1**，
+// 这样老固件的数据会被识别成"版本不匹配"，而不是被当成有效数据读出乱码。
+#ifndef CFG_STORAGE_DATA_VERSION
+#define CFG_STORAGE_DATA_VERSION 1
+#endif
+
+// 一次最多保存多少本书（每个学科最多一本，6 本实际上就够了，给到 16 有余量）
+#ifndef CFG_STORAGE_MAX_BOOKS
+#define CFG_STORAGE_MAX_BOOKS 16
+#endif
+
+// 保存的 liftSteps 绝对值超过"软限位 × 这个系数"就认为不可信，
+// 复位时应判为"需要人工归零"，而不是直接相信它。
+#ifndef CFG_STORAGE_STEPS_TRUST_FACTOR
+#define CFG_STORAGE_STEPS_TRUST_FACTOR 2
+#endif
+
+// 是否在开机时自动加载 Flash 里的书单和位置（0 = 只打开 NVS，不加载）
+#ifndef CFG_STORAGE_AUTO_LOAD
+#define CFG_STORAGE_AUTO_LOAD 1
+#endif
+
+
+// -----------------------------------------------------------------------------
+// 11. 与 ESP32-C3 步进控制板的串口链路（**本次不使用，预留**）
+//
+// 本次改造的机械控制**全部在 ESP32-S3 主控上直接做**（两台 28BYJ-48 + ULN2003），
+// 不引入第二块控制板、不引入云服务/联网借阅/语音识别。
+// 这一节只是把旧工程预留的宏留住，避免老代码找不到定义。
+// ⚠️ 想启用必须确认 GPIO6/7 没有被测距占用（本工程 ECHO 默认就是 6，会冲突）。
 // -----------------------------------------------------------------------------
 #ifndef PIN_C3_UART_TX
 #define PIN_C3_UART_TX 6
@@ -977,8 +1280,12 @@
 // -----------------------------------------------------------------------------
 // 12. 日志宏（统一入口，方便以后整体关掉）
 //
-//   CFG_LOG(2, "系统信息: ram=%uKB\n", ramKb);
+//   CFG_LOGI("系统信息: ram=%uKB", ramKb);
 //   等级 >= CFG_LOG_LEVEL 才真的打印，CFG_LOG_LEVEL=0 时连编译都不进。
+//
+// 【本次改造要求：错误状态不能只打串口】
+//   用户可见的重要错误（分类 ID 无效、学科重复、机械失败、需要人工归零、
+//   Flash 读写失败）必须**同时**反映到界面上（消息层/调试页），不能只 printf。
 // -----------------------------------------------------------------------------
 #define CFG_LOG_NONE  0
 #define CFG_LOG_ERROR 1
@@ -1011,7 +1318,7 @@
 #define HUSKYLIB_VERSION "1.0.0"
 #endif
 #ifndef DISPLAYLIB_VERSION
-#define DISPLAYLIB_VERSION "1.1.0"    // 1.1.0: 加屏幕分层排错(彩条/纯色块/刷屏心跳/总线锁)
+#define DISPLAYLIB_VERSION "1.2.0"    // 1.2.0: 加第6页电机调试页 + 全页面只允许上下滑动
 #endif
 #ifndef SYSINFOLIB_VERSION
 #define SYSINFOLIB_VERSION "1.0.0"
@@ -1026,8 +1333,16 @@
 #define TOUCHLIB_VERSION "1.0.0"
 #endif
 #ifndef BOOKLISTLIB_VERSION
-#define BOOKLISTLIB_VERSION "1.0.0"
+#define BOOKLISTLIB_VERSION "1.1.0"    // 1.1.0: 方案A —— 一个学科只留一条记录
+#endif
+#ifndef BOOKDOMAINLIB_VERSION
+#define BOOKDOMAINLIB_VERSION "1.0.0"
+#endif
+#ifndef MECHANISMLIB_VERSION
+#define MECHANISMLIB_VERSION "1.0.0"
+#endif
+#ifndef STORAGELIB_VERSION
+#define STORAGELIB_VERSION "1.0.0"
 #endif
 
-
-#endif
+// -----------------------------------------------------------------------------,// 14. 引脚冲突编译期体检（**新增：一次性把明确的抢脚拦在编译期**）,//,// 为什么要有这一段：引脚冲突在运行期的表现是"某个外设时好时坏"，非常难查。,// 这里用预处理期就把能确定的冲突拦下来，编译直接报中文错误，,// 而不是烧进去以后在台子上猜。,//,// ⚠️ 只检查"能确定冲突"的情况：同一个 GPIO 被两个**同时启用**的外设占用。,//    外设关掉时不算占用（没接线的脚不算冲突）。,// -----------------------------------------------------------------------------,,// ---- 14.1 每个电机的 4 个 IN 脚内部不能重复 ----,#if CFG_STEPPER_LIFT_ENABLE,#if (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_LIFT_PINS)[1] || \,    (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_LIFT_PINS)[2] || \,    (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_LIFT_PINS)[3],#error "config.h 14.1: 升降电机的 4 个 IN 脚里有重复的 GPIO，检查 CFG_STEPPER_LIFT_PINS",#endif,#endif,,#if CFG_STEPPER_PUSH_ENABLE,#if (CFG_STEPPER_PUSH_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[1] || \,    (CFG_STEPPER_PUSH_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[2] || \,    (CFG_STEPPER_PUSH_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[3],#error "config.h 14.1: 推书电机的 4 个 IN 脚里有重复的 GPIO，检查 CFG_STEPPER_PUSH_PINS",#endif,#endif,,// ---- 14.2 两个电机之间不能抢脚 ----,#if CFG_STEPPER_LIFT_ENABLE && CFG_STEPPER_PUSH_ENABLE,#if (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[0] || \,    (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[1] || \,    (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[2] || \,    (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[3] || \,    (CFG_STEPPER_LIFT_PINS)[1] == (CFG_STEPPER_PUSH_PINS)[0] || \,    (CFG_STEPPER_LIFT_PINS)[1] == (CFG_STEPPER_PUSH_PINS)[1] || \,    (CFG_STEPPER_LIFT_PINS)[1] == (CFG_STEPPER_PUSH_PINS)[2] || \,    (CFG_STEPPER_LIFT_PINS)[1] == (CFG_STEPPER_PUSH_PINS)[3] || \,    (CFG_STEPPER_LIFT_PINS)[2] == (CFG_STEPPER_PUSH_PINS)[0] || \,    (CFG_STEPPER_LIFT_PINS)[2] == (CFG_STEPPER_PUSH_PINS)[1] || \,    (CFG_STEPPER_LIFT_PINS)[2] == (CFG_STEPPER_PUSH_PINS)[2] || \,    (CFG_STEPPER_LIFT_PINS)[2] == (CFG_STEPPER_PUSH_PINS)[3] || \,    (CFG_STEPPER_LIFT_PINS)[3] == (CFG_STEPPER_PUSH_PINS)[0] || \,    (CFG_STEPPER_LIFT_PINS)[3] == (CFG_STEPPER_PUSH_PINS)[1] || \,    (CFG_STEPPER_LIFT_PINS)[3] == (CFG_STEPPER_PUSH_PINS)[2] || \,    (CFG_STEPPER_LIFT_PINS)[3] == (CFG_STEPPER_PUSH_PINS)[3],#error "config.h 14.2: 升降电机和推书电机抢 GPIO，检查 CFG_STEPPER_LIFT_PINS / CFG_STEPPER_PUSH_PINS",#endif,#endif,,// ---- 14.3 HC-SR04 与升降电机抢脚（这是原工程就有的老问题，必须拦） ----,// 把 TRIG/ECHO 改成空闲脚（例如 38/39）之后，这个检查就会自然通过。,#if CFG_ENABLE_STEPPER && CFG_STEPPER_LIFT_ENABLE && (CFG_ENABLE_WAVE || PIN_WAVE_TRIG >= 0),#if (PIN_WAVE_TRIG >= 0) && ((PIN_WAVE_TRIG == (CFG_STEPPER_LIFT_PINS)[0]) || \,    (PIN_WAVE_TRIG == (CFG_STEPPER_LIFT_PINS)[1]) || \,    (PIN_WAVE_TRIG == (CFG_STEPPER_LIFT_PINS)[2]) || \,    (PIN_WAVE_TRIG == (CFG_STEPPER_LIFT_PINS)[3]) || \,    (PIN_WAVE_ECHO == (CFG_STEPPER_LIFT_PINS)[0]) || \,    (PIN_WAVE_ECHO == (CFG_STEPPER_LIFT_PINS)[1]) || \,    (PIN_WAVE_ECHO == (CFG_STEPPER_LIFT_PINS)[2]) || \,    (PIN_WAVE_ECHO == (CFG_STEPPER_LIFT_PINS)[3]),#error "config.h 14.3: HC-SR04 的 TRIG/ECHO 与升降电机的 IN 脚冲突。请把测距挪到空闲脚，例如在 platformio.ini 的 build_flags 里加 -DPIN_WAVE_TRIG=38 -DPIN_WAVE_ECHO=39",#endif,#endif,,// ---- 14.4 步进电机与 TFT 抢脚（TFT 的 6 根线是硬需求，冲突时只能改电机） ----,// 用"4 个 IN 脚之和"和"6 个 TFT 脚之和"做交叉检查不现实，,// 这里用逐项比较，只查最容易犯的错：LIFT/PUSH 的前两个脚撞上 TFT 的任一引脚。,#if CFG_STEPPER_LIFT_ENABLE,#if (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_SCLK || (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_MOSI || \,    (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_CS   || (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_DC   || \,    (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_RST  || (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_BL   || \,    (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_SCLK || (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_MOSI || \,    (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_CS   || (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_DC   || \,    (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_RST  || (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_BL   || \,    (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_SCLK || (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_MOSI || \,    (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_CS   || (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_DC   || \,    (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_RST  || (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_BL   || \,    (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_SCLK || (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_MOSI || \,    (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_CS   || (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_DC   || \,    (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_RST  || (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_BL,#error "config.h 14.4: 升降电机与 TFT 抢 GPIO，检查第 3 节和第 9 节的引脚表",#endif,#endif,,#if CFG_STEPPER_PUSH_ENABLE,#if (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_SCLK || (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_MOSI || \,    (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_CS   || (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_DC   || \,    (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_RST  || (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_BL   || \,    (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_SCLK || (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_MOSI || \,    (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_CS   || (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_DC   || \,    (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_RST  || (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_BL   || \,    (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_SCLK || (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_MOSI || \,    (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_CS   || (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_DC   || \,    (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_RST  || (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_BL   || \,    (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_SCLK || (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_MOSI || \,    (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_CS   || (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_DC   || \,    (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_RST  || (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_BL,#error "config.h 14.4: 推书电机与 TFT 抢 GPIO，检查第 3 节和第 9 节的引脚表",#endif,#endif,,// ---- 14.5 外设不能用被内部 Flash / OPI PSRAM / USB / UART0 占掉的 GPIO ----,// 这一段是"防手滑"：这些 GPIO 一旦被外设占用，表现是随机复位或直接起不来。,#if (PIN_HUSKY_SDA >= 26 && PIN_HUSKY_SDA <= 32) || (PIN_HUSKY_SCL >= 26 && PIN_HUSKY_SCL <= 32),#error "config.h 14.5: 二哈 SDA/SCL 不能落在 GPIO26~32（封装内 Flash）",#endif,#if (PIN_HUSKY_SDA >= 33 && PIN_HUSKY_SDA <= 37) || (PIN_HUSKY_SCL >= 33 && PIN_HUSKY_SCL <= 37),#error "config.h 14.5: 二哈 SDA/SCL 不能落在 GPIO33~37（OPI PSRAM）",#endif,#if (PIN_WAVE_TRIG >= 26 && PIN_WAVE_TRIG <= 32) || (PIN_WAVE_ECHO >= 26 && PIN_WAVE_ECHO <= 32),#error "config.h 14.5: HC-SR04 不能落在 GPIO26~32（封装内 Flash）",#endif,#if (PIN_WAVE_TRIG >= 33 && PIN_WAVE_TRIG <= 37) || (PIN_WAVE_ECHO >= 33 && PIN_WAVE_ECHO <= 37),#error "config.h 14.5: HC-SR04 不能落在 GPIO33~37（OPI PSRAM）",#endif,#if (PIN_WAVE_TRIG == 19) || (PIN_WAVE_TRIG == 20) || (PIN_WAVE_ECHO == 19) || (PIN_WAVE_ECHO == 20),#error "config.h 14.5: HC-SR04 不能落在 GPIO19/20（USB D-/D+）",#endif,#if (PIN_WAVE_TRIG == 43) || (PIN_WAVE_TRIG == 44) || (PIN_WAVE_ECHO == 43) || (PIN_WAVE_ECHO == 44),#error "config.h 14.5: HC-SR04 不能落在 GPIO43/44（UART0 调试串口）",#endif,,// ---- 14.6 超声波引脚不能留给触摸（两条总线都在同一批 GPIO 上很容易搞混） ----,#if CFG_RUN_TOUCH && (PIN_WAVE_TRIG >= 0),#if (PIN_WAVE_TRIG == PIN_TOUCH_CS) || (PIN_WAVE_TRIG == PIN_TOUCH_CLK) || \,    (PIN_WAVE_TRIG == PIN_TOUCH_DIN) || (PIN_WAVE_TRIG == PIN_TOUCH_DO) || \,    (PIN_WAVE_ECHO == PIN_TOUCH_CS) || (PIN_WAVE_ECHO == PIN_TOUCH_CLK) || \,    (PIN_WAVE_ECHO == PIN_TOUCH_DIN) || (PIN_WAVE_ECHO == PIN_TOUCH_DO),#error "config.h 14.6: HC-SR04 与触摸抢 GPIO，检查第 3.2 节和第 8 节",#endif,#endif,,,// =============================================================================,// 【本次改造的统一引脚分配表】—— 一眼看全部，改线只改第 3 / 3.2 / 4 / 5 / 8 / 9 节,//,//  外设                     GPIO                      备注,//  ----------------------   -----------------------   ------------------------------,//  ILI9341 SCLK             12                        TFT_eSPI USER_SETUP（platformio.ini）,//  ILI9341 MOSI             11                        同上,//  ILI9341 CS               10                        同上,//  ILI9341 DC               9                         同上,//  ILI9341 RST              8                         同上,//  ILI9341 BL               47                        同上,//  XPT2046 T_CS             48                        触摸自己的 5 根线，不占屏的 SPI,//  XPT2046 T_IRQ            18                        可不接（本工程轮询）,//  XPT2046 T_CLK            13                        本来是步进电机3 的旧引脚，本次释放,//  XPT2046 T_DIN            14                        同上,//  XPT2046 T_DO             38                        同上,//  HUSKYLENS 2 SDA          1                         I2C 地址 0x50；与摄像头 SCCB 冲突,//  HUSKYLENS 2 SCL          2                         同上,//  按键 1 / 2 / 3           45 / 46 / 0               45/46 空闲；GPIO0 是 BOOT 脚,//  按键 A / B（取书/存书）  -1 / -1                   默认不接（需求：不要擅自加按键脚）,//  升降电机 IN1~IN4         4, 5, 6, 7                28BYJ-48 + ULN2003,//  推书电机 IN1~IN4         15, 16, 17, 21            28BYJ-48 + ULN2003,//  HC-SR04 TRIG             5                         与升降电机 IN2 冲突 -> 默认关,//  HC-SR04 ECHO             6                         5V，必须 1k+2k 分压！,//,//  ⚠️ 绝对不能接外设：GPIO26~32（封装内 Flash）、GPIO33~37（OPI PSRAM）、,//     GPIO22~25（S3 上不存在）、GPIO19/20（USB）、GPIO43/44（UART0）。,//,//  ⚠️ 空出来的 GPIO（本次没用到，以后要用先查一遍）：,//     3, 7 已被升降电机占用；剩余空闲：37 之后的 39、40、41、42（但 40/41/42 = 摄像头 D5/D6/D7）,// =============================================================================

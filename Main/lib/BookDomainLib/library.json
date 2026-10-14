@@ -1,0 +1,13 @@
+{
+  "name": "BookDomainLib",
+  "version": "1.0.0",
+  "description": "书籍业务规则：学科分类 ID 1~6 到中文名的映射、方案A 重复检查、书堆顺序文本",
+  "keywords": "book, domain, category",
+  "authors": [
+    { "name": "SmartBookShelf" }
+  ],
+  "license": "MIT",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": { "srcDir": "src" }
+}

@@ -7,6 +7,12 @@
 
 #include "WiFiconfig.h"
 #include "LLMconfig.h"
+#include "PINSETconfig.h"
+
+//超声波测量 全局变量声明
+static volatile uint32_t _EchoStartUS = 0;
+static volatile uint32_t _EchoPulseUs = 0;
+static volatile bool _EchoDone = false;
 
 //定义对象
 //创建https客户端
@@ -35,14 +41,27 @@ static String LLM_JSON = R"({
 //前置函数声明
 static void HTTPSTestTask(void *pvParameters);
 static void WiFiConnectTask(void *pvParameters);
+static void HCSR04Task(void *pvParameters);
+
+static void delayUs(uint16_t _time);
+
+static void _EchoISR();
 
 //初始化
 void setup(){
     Serial.begin(115200);
     delay(1000);
 
-    xTaskCreatePinnedToCore(WiFiConnectTask, "WIFI CONNECT TASK", 4096, NULL, 1, NULL, 1);
+    //xTaskCreatePinnedToCore(WiFiConnectTask, "WIFI CONNECT TASK", 4096, NULL, 1, NULL, 1);
+    xTaskCreatePinnedToCore(HCSR04Task, "HC-SR04Task", 1024, NULL, 1, NULL, 1);
 
+//    pinMode(4,OUTPUT);
+//    while(1){
+//    digitalWrite(4,HIGH);
+//    vTaskDelay(pdMS_TO_TICKS(1000));
+//    digitalWrite(4,LOW);
+//    vTaskDelay(pdMS_TO_TICKS(1000));
+//    }
 }
 
 //循环
@@ -147,4 +166,66 @@ static void HTTPSTestTask(void *pvParameters){
     //结束会话
     https.end();
     vTaskDelete(NULL);
+}
+
+static void HCSR04Task(void *pvParameters){
+    pinMode(TRIGPIN, OUTPUT);
+    pinMode(ECHOPIN, OUTPUT);
+
+    float distance = 0;
+
+    //注册中断
+    attachInterrupt(
+        digitalPinToInterrupt(ECHOPIN),
+        _EchoISR,
+        CHANGE //双边沿
+    );
+
+    for(;;){
+        digitalWrite(TRIGPIN, LOW);
+        delayUs(2);
+        digitalWrite(TRIGPIN, HIGH);
+        delayUs(10);
+        digitalWrite(TRIGPIN, LOW);
+
+        while(!_EchoDone){
+            vTaskDelay(pdMS_TO_TICKS(5));
+        }
+
+        distance = _EchoPulseUs / 5.80f;
+        
+        Serial.println(distance);
+
+        // 控制测距频率，避免触发过快
+        vTaskDelay(pdMS_TO_TICKS(60));
+    }
+        
+    
+
+}
+
+void delayUs(uint16_t _time){
+    uint16_t _updateTime = micros();
+    uint16_t _nowTime = micros();
+
+    while ((_nowTime - _updateTime) >= _time)
+    {
+        _nowTime = micros();
+    }
+
+}
+
+void IRAM_ATTR _EchoISR(){
+    uint32_t now = micros();
+
+    _EchoDone = false;
+
+    if(digitalRead(ECHOPIN) == HIGH){
+        _EchoStartUS = now;
+    }
+    else{
+        _EchoPulseUs = now - _EchoStartUS;
+    }
+
+    _EchoDone = true;
 }

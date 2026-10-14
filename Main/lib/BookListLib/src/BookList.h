@@ -43,6 +43,17 @@ public:
     // 直接追加一条（串口测试用，不去重）
     int16_t add(const char *text, int16_t id = 0);
 
+    // 插到第 index 条的位置（后面的整体往后挪一格），返回它插进去后的下标。
+    // 本次改造用它实现"新书插到书堆顶部"：insertAt(0, ...)。
+    //   index <= 0      -> 插到最前面（新书从顶部放入，逻辑书堆里也在最顶）
+    //   index >= _count -> 等同于 add()（追加到末尾）
+    // 返回 -1 = 失败（没 begin / 内存不够 / 超过 CFG_BOOKLIST_MAX / index 为负）
+    int16_t insertAt(int16_t index, int16_t id, const char *text);
+
+    // 按下标找 id：找到返回下标，找不到返回 -1。
+    // 每个学科最多一条记录，所以"找某个学科"就是"按 id 找"。
+    int16_t findById(int16_t id);
+
     // 删掉第 index 条，后面的整体往前挪，并把容量留着不缩（避免反复 malloc）。
     // 返回删除后剩下的条数，-1 = 下标不合法
     int16_t removeAt(int16_t index);

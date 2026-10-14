@@ -1,0 +1,23 @@
+# ---- 构建产物 / 本机环境（不提交）----
+*.o
+*.a
+*.d
+*.elf
+*.bin
+*.map
+
+# PlatformIO 构建目录与本地依赖（体积大、可重新生成）
+.pio/
+**/.pio/
+
+# Python
+__pycache__/
+*.pyc
+
+# DSH 沙箱 ACL 报告（本机运行产物）
+.acl-report/
+
+# 编辑器 / 系统
+.DS_Store
+Thumbs.db
+.vscode/*.log

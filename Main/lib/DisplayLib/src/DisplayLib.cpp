@@ -10,6 +10,29 @@
 #include "FontCheck.h"
 
 // =============================================================================
+// 调试页要用、但 include/config.h 里可能还没有的配置项
+//
+// config.h 第 9.2 节已经有 CFG_DEBUG_JOG_SMALL/MID/LARGE 了，这里的 #ifndef 只是兜底：
+// 万一别人拿这份库单独编译（或者 config.h 又被整理），本库也不会因为缺宏编不过。
+// 一旦 config.h 里有了，这里的默认值自动失效。
+//
+// 为什么要分"点动步长"三档：手动调机械时一步走多远决定了能不能微调——
+// 10 步 ≈ 0.9°（输出轴 4096 步/圈），100 步 ≈ 8.8°，500 步 ≈ 44°。
+// =============================================================================
+#ifndef CFG_DEBUG_JOG_SMALL
+#define CFG_DEBUG_JOG_SMALL 10
+#endif
+#ifndef CFG_DEBUG_JOG_MID
+#define CFG_DEBUG_JOG_MID 100
+#endif
+#ifndef CFG_DEBUG_JOG_LARGE
+#define CFG_DEBUG_JOG_LARGE 500
+#endif
+#ifndef CFG_DEBUG_QUEUE_LEN
+#define CFG_DEBUG_QUEUE_LEN 8      // 调试页 -> 业务任务的命令队列长度（需求定死 8 条）
+#endif
+
+// =============================================================================
 // DisplayLib 实现（LVGL 8.4 中文版）
 //
 // 刷新逻辑分三层：
@@ -103,6 +126,19 @@ static DisplayLib *s_self = nullptr;
 
 //布局
 #define TITLE_H 32
+
+// 调试页 / 调试入口的布局与时序（要调布局只改这几个数）
+// ⚠️ 这几个 #define 必须放在使用它们的函数**之前**（放在文件靠后的"布局"段会编不过）。
+#define DEBUG_ROW_H 34          // 调试页一行按钮的高度（行高 34，按钮 30，留 4 间距）
+#define DEBUG_BTN_W 62          // 状态页/书列表页右下角"调试"入口的宽
+#define DEBUG_BTN_H 24          // 它的高
+// 它的底边离屏幕底部多远：主动躲开最下方 CFG_TOUCH_BOTTOM_MASK_PX 那段不响应触摸的屏蔽区
+#define DEBUG_BTN_BOTTOM (CFG_TOUCH_BOTTOM_MASK_PX + 4)
+// 书列表页的滚动容器要主动给"调试"入口让出的高度（按钮 24 + 6 间距），
+// 不然入口会压在最后几行的"取出"按钮上面，那边就点不着了。
+#define DEBUG_BTN_RESERVE (DEBUG_BTN_H + 6)
+// 清空书单的二次确认时限(ms)：超时自动收回，免得"上膛"以后被下一次误点清库
+#define DEBUG_CLEAR_CONFIRM_MS 3000
 
 // =============================================================================
 // 显示/隐藏一个控件：状态没变就不动它
@@ -364,6 +400,220 @@ static void onBtnTakeOut(lv_event_t *e) {
 #endif  // CFG_RUN_TOUCH
 
 // =============================================================================
+// 调试页（第 6 页）：控件、内部命令队列、数据快照、按钮回调
+//
+// 这一段放在构造函数之前，是为了让后面所有用到它的地方（构造/begin/taskLoop/update/
+// createDebugUi/showDebugPage）都能直接看到；也保证 s_self / 布局宏已经声明过。
+// =============================================================================
+
+// ⚠️ 这些控件和别的页面一样，只在 displayTask 里碰（LVGL 不是线程安全的）
+static lv_obj_t *s_debugPanel = nullptr;    // 调试页的竖直滚动容器（只能上下滑）
+static lv_obj_t *s_debugText = nullptr;     // 调试页正文（中文多行，跟着容器一起滚）
+static lv_obj_t *s_btnDebugEnter = nullptr; // 状态页/书列表页右下角的"调试"入口
+static lv_obj_t *s_btnClearBooks = nullptr; // "清空书籍"按钮（要二次确认，文字会变）
+static lv_obj_t *s_jogBtn[3] = {nullptr, nullptr, nullptr};  // 小/中/大 三个步长按钮
+
+// 清空书单的二次确认：armed = "已经点过一次，正等第二次确认"
+static bool s_clearArmed = false;
+static uint32_t s_clearArmUntil = 0;        // 过了这个时刻就自动取消确认
+
+// ---- 调试意图队列：界面 -> 业务任务 ----
+// 为什么不让事件回调直接调 handler：LVGL 的事件回调跑在 displayTask 的调用链里，
+// 在那里做业务（哪怕只是往 MotorQueue 投一条）都可能变慢，直接拖慢刷屏。
+// 多一层几十字节的内部队列：回调只入队（不阻塞），taskLoop() 每轮再取出来交给 handler。
+static QueueHandle_t s_debugQueue = nullptr;
+static void (*s_debugCmdHandler)(uint8_t cmd, int16_t arg) = nullptr;
+
+// ---- 调试页数据快照：业务任务写、显示任务读 ----
+static SemaphoreHandle_t s_debugMutex = nullptr;
+static DebugState s_debugState;                        // 显示用的纯数据快照（构造里给默认值）
+// 当前点动步长（调试页按钮改它）。
+// 这里用 int16_t 存"权威值"：jog 命令的 arg 就是 int16_t，一路传给 MotorQueue 不用来回转。
+// 对外的 DebugState.jogSteps / debugJogSteps() 是 uint16_t（lead 已确认改类型），
+// 三档 10/100/500 都能原样表示，不再有"500 被截断成 244"的问题。
+static int16_t s_jogSteps = CFG_DEBUG_JOG_MID;
+
+// =============================================================================
+// 事件回调里"投意图"：入队就返回，绝不阻塞、绝不碰 GPIO
+// 队列满就丢并打日志——宁可丢一次点动，也不能让显示任务在这里等。
+// =============================================================================
+static void debugPostCmd(uint8_t cmd, int16_t arg) {
+    if (s_debugQueue == nullptr) {
+        Serial.printf("⚠️ 调试: 命令队列没建好，命令 %u 丢弃\n", (unsigned)cmd);
+        return;
+    }
+    DisplayDebugMsg msg;
+    msg.cmd = cmd;
+    msg.arg = arg;
+    if (xQueueSend(s_debugQueue, &msg, 0) != pdTRUE) {
+        Serial.printf("⚠️ 调试: 命令队列满，命令 %u 丢弃\n", (unsigned)cmd);
+    }
+}
+
+// =============================================================================
+// 清空书单的二次确认开关
+//
+// 为什么必须有：清空书籍数据是不可逆的破坏性操作，调试时手指又容易连点。
+// 第一次点只"上膛"（按钮文字变成"再点一次确认清空"），第二次点才真的投命令；
+// 超过 DEBUG_CLEAR_CONFIRM_MS 没再点就自动收回（serviceDebugConfirm() 每轮查一眼）。
+// =============================================================================
+static void debugClearArm(bool armed) {
+    s_clearArmed = armed;
+    s_clearArmUntil = armed ? (millis() + DEBUG_CLEAR_CONFIRM_MS) : 0;
+    if (s_btnClearBooks != nullptr) {
+        // 按钮里只有一个 label（makeDebugButton 建的），改它的第 0 个子控件就是改按钮文字
+        lv_obj_t *label = lv_obj_get_child(s_btnClearBooks, 0);
+        if (label != nullptr) {
+            lv_label_set_text(label, armed ? "再点一次确认清空" : "清空书籍");
+        }
+    }
+}
+
+// =============================================================================
+// taskLoop 每轮把队列里攒下的"意图"交给注册的 handler
+//
+// 为什么不直接在事件回调里调：handler 是 main.cpp 注册的业务代码，
+// 让它跑在 LVGL 的调用链上，一旦它变慢就会连带卡住刷屏。多一次出队，代价可以忽略。
+// =============================================================================
+static void debugDispatch() {
+    if (s_debugQueue == nullptr) {
+        return;
+    }
+    DisplayDebugMsg msg;
+    // 一轮最多取 CFG_DEBUG_QUEUE_LEN 条：队列就这么长，取完自然结束，不会把刷屏饿死
+    for (uint8_t i = 0; i < CFG_DEBUG_QUEUE_LEN; i++) {
+        if (xQueueReceive(s_debugQueue, &msg, 0) != pdTRUE) {
+            return;
+        }
+        if (s_debugCmdHandler != nullptr) {
+            s_debugCmdHandler(msg.cmd, msg.arg);
+        } else {
+            Serial.printf("⚠️ 调试: 没有注册动作处理函数，命令 %u(参数 %d) 被丢弃\n",
+                          (unsigned)msg.cmd, (int)msg.arg);
+        }
+    }
+}
+
+// 上报用的无符号视图：s_jogSteps 只会被设成三个正数，这里只是把类型收敛干净
+static uint16_t debugJogStepsU16() {
+    return (uint16_t)((s_jogSteps < 0) ? 0 : s_jogSteps);
+}
+
+// =============================================================================
+// 内部设置点动步长（int16_t 入参）
+//
+// 对外的 setDebugJogSteps(uint16_t) 是它的一层薄封装，调试页的三个按钮也调这里。
+// 非法值一律拒绝：点动步长直接决定电机走多少步，乱给值可能一步就撞到机构。
+// =============================================================================
+static void debugApplyJogSteps(int16_t steps) {
+    if (steps != CFG_DEBUG_JOG_SMALL && steps != CFG_DEBUG_JOG_MID &&
+        steps != CFG_DEBUG_JOG_LARGE) {
+        Serial.printf("⚠️ 调试: 非法点动步长 %d，只接受 %d/%d/%d 步\n", (int)steps,
+                      (int)CFG_DEBUG_JOG_SMALL, (int)CFG_DEBUG_JOG_MID,
+                      (int)CFG_DEBUG_JOG_LARGE);
+        return;
+    }
+
+    s_jogSteps = steps;
+    if (s_debugMutex != nullptr &&
+        xSemaphoreTake(s_debugMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        s_debugState.jogSteps = (uint16_t)steps;   // jogSteps 已是 uint16_t，500 能存下
+        xSemaphoreGive(s_debugMutex);
+    }
+    Serial.printf("调试: 点动步长 = %d 步/次\n", (int)steps);
+}
+
+// =============================================================================
+// 调试页的按钮回调：**只投意图，绝不做业务**
+//
+// 每个回调只做一件事：debugPostCmd()/setDebugJogSteps()（都是几微秒就返回的）。
+// 真正碰电机引脚的代码只存在于 stepperTask（全工程唯一碰电机的任务）。
+// 这些回调故意放在 CFG_RUN_TOUCH 之外：它们不碰触摸驱动，
+// 没有触摸时按钮照样建出来（只是没人点），串口命令仍是唯一入口。
+// =============================================================================
+static void onBtnDebugLiftUp(lv_event_t *e) {
+    (void)e;
+    debugPostCmd(DEBUG_CMD_LIFT_UP, (int16_t)s_jogSteps);
+}
+
+static void onBtnDebugLiftDown(lv_event_t *e) {
+    (void)e;
+    debugPostCmd(DEBUG_CMD_LIFT_DOWN, (int16_t)s_jogSteps);
+}
+
+static void onBtnDebugPushForward(lv_event_t *e) {
+    (void)e;
+    debugPostCmd(DEBUG_CMD_PUSH_FORWARD, (int16_t)s_jogSteps);
+}
+
+static void onBtnDebugPushBack(lv_event_t *e) {
+    (void)e;
+    debugPostCmd(DEBUG_CMD_PUSH_BACK, (int16_t)s_jogSteps);
+}
+
+static void onBtnDebugStop(lv_event_t *e) {
+    (void)e;
+    debugPostCmd(DEBUG_CMD_STOP_ALL, 0);
+}
+
+static void onBtnDebugSetZero(lv_event_t *e) {
+    (void)e;
+    debugPostCmd(DEBUG_CMD_SET_ZERO, 0);
+}
+
+static void onBtnDebugSaveNow(lv_event_t *e) {
+    (void)e;
+    debugPostCmd(DEBUG_CMD_SAVE_NOW, 0);
+}
+
+// 清空书籍数据：第一次点只上膛，第二次（3 秒内）才真发命令
+static void onBtnDebugClearBooks(lv_event_t *e) {
+    (void)e;
+    if (!s_clearArmed) {
+        debugClearArm(true);
+        Serial.println("调试: 清空书籍需要二次确认，3 秒内再点一次才执行");
+        return;
+    }
+    debugClearArm(false);
+    debugPostCmd(DEBUG_CMD_CLEAR_BOOKS, 0);
+    Serial.println("调试: 已确认清空书籍，命令已投给业务任务");
+}
+
+static void onBtnDebugJogSmall(lv_event_t *e) {
+    (void)e;
+    debugApplyJogSteps(CFG_DEBUG_JOG_SMALL);
+}
+
+static void onBtnDebugJogMid(lv_event_t *e) {
+    (void)e;
+    debugApplyJogSteps(CFG_DEBUG_JOG_MID);
+}
+
+// "大"档走内部 int16 接口：500 装不进对外的 uint8_t 签名（已报 lead）
+static void onBtnDebugJogLarge(lv_event_t *e) {
+    (void)e;
+    debugApplyJogSteps(CFG_DEBUG_JOG_LARGE);
+}
+
+// 调试页的"返回"：回状态页。页面切换只认按钮和串口命令，没有任何左右滑动手势。
+static void onBtnDebugBack(lv_event_t *e) {
+    (void)e;
+    if (s_self != nullptr) {
+        s_self->setPage(PAGE_STATUS);
+        Serial.println("调试: 返回状态页");
+    }
+}
+
+// 状态页/书列表页右下角"调试"入口
+static void onBtnEnterDebug(lv_event_t *e) {
+    (void)e;
+    if (s_self != nullptr) {
+        s_self->setPage(PAGE_DEBUG);
+        Serial.println("调试: 进入电机调试页(第 6 页)");
+    }
+}
+
+// =============================================================================
 // 构造
 // =============================================================================
 DisplayLib::DisplayLib() {
@@ -374,6 +624,11 @@ DisplayLib::DisplayLib() {
     _bookSnapNum = 0;
     _bookSnapVersion = 0;
     _booksDirty = true;
+
+    // 书单：默认没有外部挂载（main.cpp 会在 begin() 之前调 attachBookList()），
+    // 没人挂时 books() 会惰性启用兜底的 _booksOwn。
+    _booksPtr = nullptr;
+    _booksOwnReady = false;
 
     _mutex = nullptr;
     _taskHandle = nullptr;
@@ -387,6 +642,23 @@ DisplayLib::DisplayLib() {
     _testRequest = 0;
     _rawTestHoldMs = CFG_SELFTEST_BAR_HOLD_MS;
     _blOn = true;   // begin() 里 backlightInit() 会把背光打开
+
+    // 调试页的默认值：先当"位置无效、需要人工归零"，
+    // 免得开机第一次进调试页就看到一个骗人的"位置有效"。
+    // lastActionOk 默认 true：还没有任何动作时不该报"上次失败"。
+    s_jogSteps = CFG_DEBUG_JOG_MID;
+    memset(&s_debugState, 0, sizeof(s_debugState));
+    s_debugState.jogSteps = (uint16_t)s_jogSteps;
+    s_debugState.lastActionOk = true;
+    s_debugState.positionValid = false;
+    s_debugState.needHoming = true;
+    // 升降软限位只是先给个参考值：真正的行程由 stepperTask 通过 setDebugState() 填。
+    // 用 LIFT 这个宏而不是旧的 M3：新机械定义里 升降 = LIFT 轴。
+    s_debugState.liftRange = CFG_STEPPER_LIFT_RANGE_STEPS;
+    snprintf(s_debugState.bookOrder, sizeof(s_debugState.bookOrder), "无");
+    snprintf(s_debugState.lastError, sizeof(s_debugState.lastError), "无");
+    s_clearArmed = false;
+    s_clearArmUntil = 0;
 }
 
 void DisplayLib::displayTaskEntry(void *pvParameters) {
@@ -410,12 +682,24 @@ bool DisplayLib::begin() {
         return false;
     }
 
+    // 调试页的内部小队列 + 快照锁：要在别的任务开始注册调试命令之前就建好。
+    // 建不起来不返回 false——丢的是"调试页按钮"，其它页面照常工作。
+    if (s_debugQueue == nullptr) {
+        s_debugQueue = xQueueCreate(CFG_DEBUG_QUEUE_LEN, sizeof(DisplayDebugMsg));
+    }
+    if (s_debugMutex == nullptr) {
+        s_debugMutex = xSemaphoreCreateMutex();
+    }
+    if (s_debugQueue == nullptr || s_debugMutex == nullptr) {
+        Serial.println("⚠️ 显示库: 调试页队列/锁创建失败（调试页按钮会失效，其它页不受影响）");
+    }
+
     // 书单：动态数组，先申请 CFG_BOOKLIST_INIT_CAP 条，不够会自动扩容
-    if (!_books.begin()) {
+    if (!books().begin()) {
         Serial.println("显示库: 书单初始化失败（内存不够?）");
     } else {
         Serial.printf("显示库: 书单就绪（动态数组, 初始 %d 条, 上限 %d 条）\n",
-                      _books.capacity(), CFG_BOOKLIST_MAX);
+                      books().capacity(), CFG_BOOKLIST_MAX);
     }
 
     // ---- 1) 屏幕 ----
@@ -640,6 +924,12 @@ void DisplayLib::createUi() {
     lv_obj_set_style_bg_color(scr, lv_color_hex(COLOR_BODY_BG), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
+    // ===== 全工程只允许上下滑，禁止左右滑 =====
+    // 根屏幕**完全禁止滚动**：页面切换只认屏幕按钮和串口命令，
+    // 绝不能出现"手指左右一划就换页"——调机械时那种误触最要命。
+    // 需要滚动的内容一律放进各自的容器，容器显式设成 LV_DIR_VER（见下面各 xxxUi()）。
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
     // ---- 标题栏 ----
     lv_obj_t *titleBar = lv_obj_create(scr);
     lv_obj_set_size(titleBar, SCR_W, TITLE_H);
@@ -712,6 +1002,9 @@ void DisplayLib::createUi() {
 
     // 书列表页的滚动容器（默认隐藏，翻到书列表页才显示）
     createBookUi();
+
+    // 调试页（第 6 页）的竖直滚动容器 + 按钮，以及状态页/书列表页右下角的"调试"入口
+    createDebugUi();
 }
 
 // =============================================================================
@@ -821,7 +1114,7 @@ void DisplayLib::countBook(const HuskyWord &word) {
     if (text[0] == '\0') {
         text = word.name;
     }
-    if (_books.addOrCount(word.id, text) >= 0) {
+    if (books().addOrCount(word.id, text) >= 0) {
         _booksDirty = true;   // 列表变了，书列表页的行控件要重建
         _dirty = true;
     }
@@ -829,7 +1122,7 @@ void DisplayLib::countBook(const HuskyWord &word) {
 
 // 直接加一条（串口测试用，不去重）：没有二哈也能把书列表页/取出按钮/滚动试出来
 int16_t DisplayLib::addBook(const char *text, int16_t id) {
-    int16_t index = _books.add(text, id);
+    int16_t index = books().add(text, id);
     if (index >= 0) {
         _booksDirty = true;
         _dirty = true;
@@ -844,12 +1137,12 @@ int16_t DisplayLib::removeBook(int16_t index) {
     // 先把要取出的那条读出来：日志要打名字，以后接机械也要拿它定位
     BookItem item;
     memset(&item, 0, sizeof(item));
-    if (!_books.at(index, &item)) {
+    if (!books().at(index, &item)) {
         Serial.printf("书单: 取出失败, 下标 %d 不合法\n", (int)index);
         return -1;
     }
 
-    int16_t left = _books.removeAt(index);
+    int16_t left = books().removeAt(index);
     if (left < 0) {
         return -1;
     }
@@ -864,18 +1157,50 @@ int16_t DisplayLib::removeBook(int16_t index) {
 }
 
 void DisplayLib::clearBooks() {
-    _books.clear();
+    books().clear();
     _booksDirty = true;
     _dirty = true;
     Serial.println("书单: 已清空");
 }
 
 int16_t DisplayLib::bookCount() {
-    return _books.count();
+    return books().count();
 }
 
 void DisplayLib::printBooks() {
-    _books.print();
+    books().print();
+}
+
+// =============================================================================
+// 书单归属：main.cpp 在 begin() 之前把自己那份 BookList 挂进来
+//
+// 为什么要挂载而不是各建一份：显示列表 / Flash 内容 / 机械位置计算必须看同一份数据，
+// 不然会出现"屏上显示 3 本、业务认为 2 本"这种查不出来的问题。
+// 本库只在没人挂载时（串口测试、单独编译本库）才启用自己的兜底数组。
+// =============================================================================
+void DisplayLib::attachBookList(BookList *booksIn) {
+    // ⚠️ 传空指针直接返回：绝不能把已经挂好的那份弄丢（把显示切成空列表是最糟的失败方式）
+    if (booksIn == nullptr) {
+        Serial.println("显示库: attachBookList(nullptr) 被忽略，继续用当前书单");
+        return;
+    }
+    _booksPtr = booksIn;
+    _booksPtr->begin();     // begin() 是幂等的：已经建过就只补锁，不会清数据
+    _booksDirty = true;     // 列表可能换了内容，下次刷新重建行控件
+    _dirty = true;
+    Serial.println("显示库: 已挂载外部书单（显示/业务共用同一份数据）");
+}
+
+BookList &DisplayLib::books() {
+    if (_booksPtr != nullptr) {
+        return *_booksPtr;
+    }
+    // 没人挂载：惰性启用兜底数组，保证本库单独跑（串口测试）也有书单可用
+    if (!_booksOwnReady) {
+        _booksOwn.begin();
+        _booksOwnReady = true;
+    }
+    return _booksOwn;
 }
 
 void DisplayLib::showMessage(const char *text, uint32_t ms) {
@@ -947,7 +1272,8 @@ void DisplayLib::printHelp() {
     Serial.println("  2 = 已识别书列表页");
     Serial.println("  3 = 超声波测距页(距离/滤波/统计/测厚)");
     Serial.println("  4 = 触摸测试页(按钮计数 + 坐标/原始值)，命令 t 直接跳过去");
-    Serial.println("  2 = 书列表页(动态数组书单, 每行带“取出”按钮, 可上下滑动)");
+    Serial.println("  5 = 电机调试页(升降/推书点动, 停止, 步长小/中/大, 设零点/保存/清空书单)");
+    Serial.println("      调试页按钮只投命令, 真正动电机的是 stepperTask; 所有页面只能上下滑");
 }
 
 const char *displayLibVersion() {
@@ -965,6 +1291,10 @@ void DisplayLib::taskLoop() {
 
         // 串口 d,1 请求的彩条自检：必须在显示任务里画（LVGL 只能一个任务碰）
         handleSelfTest();
+
+        // 调试页按钮投进来的"意图"在这里出队，交给 main.cpp 注册的 handler。
+        // 放在刷屏之外做：handler 万一变慢，也只是晚一帧刷屏，不会卡在 LVGL 的调用链里。
+        debugDispatch();
 
         lv_timer_handler();
 
@@ -1185,9 +1515,19 @@ void DisplayLib::printDiag() {
 // =============================================================================
 // 内容签名：只取页面上真的会显示的值，内容没变就不动控件
 // =============================================================================
+// 字符串也进签名（"内容没变就不动控件"对字符串同样有效）：
+// 只取前 32 字节，够区分"失败原因变了""书堆顺序变了"这种事，也不至于每轮算太久。
+static uint32_t hashText(uint32_t sig, const char *text) {
+    for (uint8_t i = 0; text[i] != '\0' && i < 32; i++) {
+        sig = (sig ^ (uint8_t)text[i]) * 16777619UL;
+    }
+    return sig;
+}
+
 static uint32_t computeSignature(const HuskyFrame &f, const SystemInfo &info,
                                  const WaveState &wave, int16_t bookNum,
-                                 uint32_t bookVersion, uint8_t page) {
+                                 uint32_t bookVersion, uint8_t page,
+                                 const DebugState &dbg, bool clearArmed) {
     uint32_t sig = 2166136261UL;
 
     sig = (sig ^ (uint32_t)(f.online ? 1 : 0)) * 16777619UL;
@@ -1233,6 +1573,30 @@ static uint32_t computeSignature(const HuskyFrame &f, const SystemInfo &info,
     sig = (sig ^ (uint32_t)(bookNum & 0xFF)) * 16777619UL;
     sig = (sig ^ bookVersion) * 16777619UL;
 
+    // 调试页：只把"屏幕上真的会变的东西"进签名（步数/在走/位置/测距/书单/点动步长…）。
+    // 这样 stepperTask 一改快照，下一轮就重画；没变就不动控件，不会每 5ms 白刷一次。
+    sig = (sig ^ (uint32_t)dbg.liftSteps) * 16777619UL;
+    sig = (sig ^ (uint32_t)dbg.liftLeft) * 16777619UL;
+    sig = (sig ^ (uint32_t)dbg.liftRange) * 16777619UL;
+    sig = (sig ^ (uint32_t)(dbg.liftMoving ? 1 : 0)) * 16777619UL;
+    sig = (sig ^ (uint32_t)dbg.pushSteps) * 16777619UL;
+    sig = (sig ^ (uint32_t)(dbg.pushMoving ? 1 : 0)) * 16777619UL;
+    sig = (sig ^ (uint32_t)(dbg.positionValid ? 1 : 0)) * 16777619UL;
+    sig = (sig ^ (uint32_t)(dbg.needHoming ? 1 : 0)) * 16777619UL;
+    sig = (sig ^ (uint32_t)dbg.jogSteps) * 16777619UL;
+    sig = (sig ^ (uint32_t)(dbg.lastActionOk ? 1 : 0)) * 16777619UL;
+    sig = (sig ^ (uint32_t)(dbg.flashSaved ? 1 : 0)) * 16777619UL;
+    sig = (sig ^ (uint32_t)dbg.bookNum) * 16777619UL;
+    sig = (sig ^ dbg.waveMm) * 16777619UL;
+    sig = (sig ^ (uint32_t)(dbg.waveValid ? 1 : 0)) * 16777619UL;
+    sig = (sig ^ (uint32_t)dbg.waveError) * 16777619UL;
+    sig = hashText(sig, dbg.lastError);
+    sig = hashText(sig, dbg.lastSavedInfo);
+    sig = hashText(sig, dbg.bookOrder);
+    sig = hashText(sig, dbg.note);
+    // "清空书籍"按钮文字（上膛与否）也要进签名
+    sig = (sig ^ (uint32_t)(clearArmed ? 1 : 0)) * 16777619UL;
+
     sig = (sig ^ (uint32_t)(page & 0xFF)) * 16777619UL;
     return sig;
 }
@@ -1251,6 +1615,10 @@ void DisplayLib::update() {
     return;
 #endif
 
+    // 清空书单的二次确认超时必须在这里处理：下面内容没变时会直接 return，
+    // 放在后面的话按钮文字就永远停在"再点一次确认清空"了。
+    serviceDebugConfirm();
+
     // ---- 1) 加锁取快照，马上放锁 ----
     HuskyFrame frame;
     SystemInfo info;
@@ -1259,6 +1627,7 @@ void DisplayLib::update() {
     bool messageActive = false;
     char message[sizeof(_message)];
     uint32_t messageUntil = 0;
+    DebugState dbg;          // 调试页快照（用独立的锁，下面单独取）
 
     memset(&frame, 0, sizeof(frame));
     memset(&info, 0, sizeof(info));
@@ -1278,9 +1647,18 @@ void DisplayLib::update() {
     xSemaphoreGive(_mutex);
 
     // 书单是动态数组，在别的任务里增删：拷一份快照出来画，画的过程不占它的锁
-    _bookSnapNum = _books.snapshot(_bookSnap, CFG_BOOKLIST_SNAP_MAX);
-    uint32_t bookVersion = _books.version();
-    int16_t bookTotal = _books.count();   // 真实条数（可能比快照多，快照受 SNAP_MAX 限制）
+    _bookSnapNum = books().snapshot(_bookSnap, CFG_BOOKLIST_SNAP_MAX);
+    uint32_t bookVersion = books().version();
+    int16_t bookTotal = books().count();   // 真实条数（可能比快照多，快照受 SNAP_MAX 限制）
+
+    // 调试页数据也是"别的任务写、显示任务读"：用独立的锁拷一份，
+    // 不和业务数据挤同一把锁（这一页 5ms 刷一轮，不能占着业务锁不放）。
+    memset(&dbg, 0, sizeof(dbg));
+    if (s_debugMutex != nullptr &&
+        xSemaphoreTake(s_debugMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        dbg = s_debugState;
+        xSemaphoreGive(s_debugMutex);
+    }
 
     // ---- 2) 消息到期就撤掉 ----
     if (messageActive && (int32_t)(millis() - messageUntil) >= 0) {
@@ -1306,8 +1684,8 @@ void DisplayLib::update() {
     }
 
     // ---- 4) 正常页：内容变了才更新控件 ----
-    uint32_t sig =
-        computeSignature(frame, info, wave, bookTotal, bookVersion, page);
+    uint32_t sig = computeSignature(frame, info, wave, bookTotal, bookVersion, page,
+                                    dbg, s_clearArmed);
     if (_sigValid && !_dirty && sig == _lastSig) {
         return;
     }
@@ -1325,9 +1703,15 @@ void DisplayLib::update() {
     // （用 objSetHidden：状态没变就不动它，避免每轮刷新都让面板区域白重画一次）
     objSetHidden(s_touchPanel, page != PAGE_TOUCH);
 
+    // 调试页：显示自己的竖直滚动容器（正文和按钮都在里面，只能上下滑）
+    objSetHidden(s_debugPanel, page != PAGE_DEBUG);
+
     // 书列表页：显示可滚动的书单面板，隐藏通用正文标签（面板要占满整屏高度）
     objSetHidden(s_bookPanel, page != PAGE_BOOKS);
-    objSetHidden(s_labelBody, page == PAGE_BOOKS);
+    objSetHidden(s_labelBody, page == PAGE_BOOKS || page == PAGE_DEBUG);
+
+    // "调试"入口只在状态页/书列表页出现：其它页有自己的面板和按钮，别来抢触摸
+    objSetHidden(s_btnDebugEnter, !(page == PAGE_STATUS || page == PAGE_BOOKS));
 
     switch (page) {
         case PAGE_SYSINFO:
@@ -1341,6 +1725,9 @@ void DisplayLib::update() {
             break;
         case PAGE_TOUCH:
             showTouchPage();
+            break;
+        case PAGE_DEBUG:
+            showDebugPage(dbg);
             break;
         case PAGE_STATUS:
         default:
@@ -1384,7 +1771,8 @@ void DisplayLib::showStatusPage(const HuskyFrame &f, int16_t bookNum) {
              "识别块: %d   已学: %d\n"
              "累计帧: %lu  错误: %lu\n"
              "\n最近识别:\n%s\n"
-             "\n已记录书数: %d",
+             "\n已记录书数: %d\n"
+             "\n调试页: 点右下角按钮进入",
              f.online ? "在线" : "离线", modeName, (int)f.wordNum,
              (int)f.learnedNum, (unsigned long)f.frameCount,
              (unsigned long)f.errorCount, recent, (int)bookNum);
@@ -1431,8 +1819,11 @@ void DisplayLib::createBookUi() {
     // 容器高度主动避开屏幕最下方 CFG_TOUCH_BOTTOM_MASK_PX 像素（那段不响应触摸），
     // 这样"取出"按钮永远不会被屏蔽区挡住。
     s_bookPanel = lv_obj_create(lv_scr_act());
+    // 高度再减掉 DEBUG_BTN_RESERVE：给右下角"调试"入口让位，
+    // 不然入口会压在最后几行的"取出"按钮上面，那边就点不着了。
     lv_obj_set_size(s_bookPanel, SCR_W - 8,
-                    SCR_H - TITLE_H - CFG_TOUCH_BOTTOM_MASK_PX - 8);
+                    SCR_H - TITLE_H - CFG_TOUCH_BOTTOM_MASK_PX - 8 -
+                        DEBUG_BTN_RESERVE);
     lv_obj_align(s_bookPanel, LV_ALIGN_TOP_MID, 0, TITLE_H + 4);
     lv_obj_set_style_radius(s_bookPanel, 6, 0);
     lv_obj_set_style_border_width(s_bookPanel, 0, 0);
@@ -1463,7 +1854,7 @@ void DisplayLib::rebuildBookRows() {
     lv_obj_t *header = lv_label_create(s_bookPanel);
     lv_obj_set_style_text_font(header, DISPLAY_FONT_CJK, 0);
     lv_obj_set_style_text_color(header, lv_color_hex(0x303840), 0);
-    int16_t total = _books.count();   // 真实条数：快照最多 CFG_BOOKLIST_SNAP_MAX 条
+    int16_t total = books().count();   // 真实条数：快照最多 CFG_BOOKLIST_SNAP_MAX 条
     if (total == 0) {
         lv_label_set_text(header, "书单是空的（扫到书会自动进来）");
     } else if (total > _bookSnapNum) {
@@ -1519,7 +1910,7 @@ void DisplayLib::rebuildBookRows() {
 #endif
     }
 
-    _bookSnapVersion = _books.version();
+    _bookSnapVersion = books().version();
     _booksDirty = false;
 }
 
@@ -1530,7 +1921,7 @@ void DisplayLib::showBooksPage() {
     if (s_bookPanel == nullptr) {
         return;
     }
-    if (_booksDirty || _bookSnapVersion != _books.version()) {
+    if (_booksDirty || _bookSnapVersion != books().version()) {
         rebuildBookRows();
     }
 }
@@ -1716,3 +2107,389 @@ void DisplayLib::runTouchSample() {
     Serial.println("        左右反了改 CFG_TOUCH_INVERT_X，上下反了改 CFG_TOUCH_INVERT_Y");
 #endif
 }
+
+// =============================================================================
+// 调试页（第 6 页 PAGE_DEBUG）：数据接口 + 建界面 + 刷新
+//
+// 三份代码的分工（单向，谁都不越界）：
+//   · stepperTask 等业务任务 -> setDebugState() 写"要显示的数字"（加锁，不画屏）
+//   · main.cpp -> setDebugCmdHandler() 注册"收到调试命令以后干什么"
+//   · 显示任务 -> showDebugPage() 只读快照画屏；按钮回调只往队列里投意图
+// 本文件全程不 include StepperLib，也不碰任何电机引脚。
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// 上屏前的字符清理：字库里没有的字符会画成空白或占位符
+//
+// src/ui_font_16.c 是 fontgen/gen_font.py 生成的，它给 lv_font_conv 的 --symbols
+// 过滤掉了 " ' $ & ; < > | \` 这些 ASCII，GB2312 一级字里也不含顿号、弯引号、
+// 破折号、省略号。本页这几段文字（失败原因/书堆顺序/备注/保存说明）都是别的任务填的，
+// 我们管不了它们写什么，所以在显示这一层统一换成字库里有的字符：
+// 宁可难看一点，也不能在屏上出现空白或占位符。
+// （等 Lead 重新生成字库把 '>' 补上之后，这里的 '>' -> '/' 就可以删掉）
+// -----------------------------------------------------------------------------
+static void sanitizeForFont(const char *src, char *dst, size_t dstSize) {
+    if (dst == nullptr || dstSize == 0) {
+        return;
+    }
+    dst[0] = '\0';
+    if (src == nullptr) {
+        return;
+    }
+
+    size_t out = 0;
+    for (size_t i = 0; src[i] != '\0' && out + 1 < dstSize; i++) {
+        // 先看前三个字节，后面按 UTF-8 逐个判断
+        uint8_t b0 = (uint8_t)src[i];
+        uint8_t b1 = (uint8_t)src[i + 1];
+        uint8_t b2 = (uint8_t)src[i + 2];
+
+        // ASCII 里字库缺的 4 个字符：显示成 '/' 也别显示成空白
+        if (b0 == '<' || b0 == '>' || b0 == '|' || b0 == '`') {
+            dst[out++] = '/';
+            dst[out] = '\0';
+            continue;
+        }
+        if (b0 < 0x20) {   // 控制字符（含换行/制表）换成空格，别把一行标签顶乱
+            dst[out++] = ' ';
+            dst[out] = '\0';
+            continue;
+        }
+
+        // 三字节 UTF-8：只处理"中文标点里字库确实缺的那几个"
+        if (b0 == 0xE3 && b1 == 0x80 && b2 == 0x81) {                     // 顿号
+            dst[out++] = ' ';
+            dst[out] = '\0';
+            i += 2;
+            continue;
+        }
+        if (b0 == 0xE2 && b1 == 0x80 &&
+            (b2 == 0x9C || b2 == 0x9D || b2 == 0x98 || b2 == 0x99)) {     // 弯引号
+            i += 2;
+            continue;
+        }
+        if (b0 == 0xE2 && b1 == 0x80 && b2 == 0xA6) {                     // 省略号
+            if (out + 4 <= dstSize) {
+                memcpy(dst + out, "。", 3);
+                out += 3;
+                dst[out] = '\0';
+            }
+            i += 2;
+            continue;
+        }
+        if (b0 == 0xE2 && b1 == 0x80 && b2 == 0x94) {                     // 破折号
+            dst[out++] = '-';
+            dst[out] = '\0';
+            i += 2;
+            continue;
+        }
+        if (b0 == 0xE2 && b1 == 0x86 && b2 == 0x92) {                     // 右箭头
+            dst[out++] = '/';
+            dst[out] = '\0';
+            i += 2;
+            continue;
+        }
+
+        dst[out++] = src[i];
+        dst[out] = '\0';
+    }
+}
+
+// 调试页的一行按钮容器：宽度撑满，自己禁止滚动（手指拖动交给外层竖直容器）
+static lv_obj_t *makeDebugRow(lv_obj_t *parent, int32_t height) {
+    lv_obj_t *row = lv_obj_create(parent);
+    lv_obj_set_size(row, LV_PCT(100), height);
+    lv_obj_set_style_radius(row, 0, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_set_style_pad_column(row, 4, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);   // 行不许滚，让父容器滚
+    lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(row, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER,
+                          LV_FLEX_ALIGN_CENTER);
+    return row;
+}
+
+// 调试页的按钮：中文字体、禁止自己滚动、底色由调用者给
+static lv_obj_t *makeDebugButton(lv_obj_t *parent, const char *text, int32_t w,
+                                 uint32_t colorHex) {
+    lv_obj_t *btn = lv_btn_create(parent);
+    lv_obj_set_size(btn, w, DEBUG_ROW_H - 4);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(colorHex), 0);
+    lv_obj_set_style_radius(btn, 6, 0);
+    lv_obj_clear_flag(btn, LV_OBJ_FLAG_SCROLLABLE);   // 拖动落在按钮上时交给外层滚动
+
+    lv_obj_t *label = lv_label_create(btn);
+    lv_obj_set_style_text_font(label, DISPLAY_FONT_CJK, 0);
+    lv_obj_set_style_text_color(label, lv_color_white(), 0);
+    lv_label_set_text(label, text);
+    lv_obj_center(label);
+    lv_obj_clear_flag(label, LV_OBJ_FLAG_SCROLLABLE);
+    return btn;
+}
+
+// -----------------------------------------------------------------------------
+// 外部写数据（只写数据，不画屏）
+// -----------------------------------------------------------------------------
+void setDebugState(const DebugState &st) {
+    if (s_debugMutex == nullptr) {
+        Serial.println("调试: 快照锁没建好，状态更新被丢弃");
+        return;
+    }
+    if (xSemaphoreTake(s_debugMutex, pdMS_TO_TICKS(20)) != pdTRUE) {
+        Serial.println("调试: 快照锁超时，状态更新被丢弃");
+        return;
+    }
+
+    // 点动步长归"调试页的按钮"管：setDebugJogSteps() 是唯一入口，
+    // 别的任务每轮刷状态时不能把它冲掉（否则用户刚选的步长下一轮就变回默认值）。
+    // 所以拷完快照后，把 jogSteps 强制同步成内部权威值。
+    s_debugState = st;
+    s_debugState.jogSteps = debugJogStepsU16();
+    xSemaphoreGive(s_debugMutex);
+}
+
+uint16_t debugJogSteps() {
+    // jogSteps 是 uint16_t（lead 已确认改类型），10/100/500 都能原样返回
+    return debugJogStepsU16();
+}
+
+void setDebugJogSteps(uint16_t steps) {
+    // 只接受 CFG_DEBUG_JOG_SMALL/MID/LARGE 三个值，别的值在 debugApplyJogSteps() 里被拒
+    debugApplyJogSteps((int16_t)steps);
+}
+
+void setDebugCmdHandler(void (*handler)(uint8_t cmd, int16_t arg)) {
+    s_debugCmdHandler = handler;
+    Serial.printf("调试: 动作处理函数 %s\n",
+                  (handler != nullptr) ? "已注册" : "被清空");
+}
+
+// ---- 成员版转发（见 DisplayLib.h 的说明）----
+// ⚠️ 必须写 ::setDebugXxx()，不然会解析成自己，变成无限递归。
+void DisplayLib::setDebugCmdHandler(void (*handler)(uint8_t cmd, int16_t arg)) {
+    ::setDebugCmdHandler(handler);
+}
+
+void DisplayLib::setDebugJogSteps(uint16_t steps) {
+    ::setDebugJogSteps(steps);
+}
+
+// =============================================================================
+// 调试页界面：一个"只能上下滑"的竖直滚动容器，里面 = 正文 + 一排排按钮
+//
+// 为什么整页都塞进滚动容器：这一页要显示的字多（升降/推书/位置/测距/书单/动作/Flash），
+// 240x320 放不下，必然要滚。容器只给 LV_DIR_VER，
+// 手指左右划不会有一丁点反应 —— 页面切换只允许按钮和串口命令。
+// =============================================================================
+void DisplayLib::createDebugUi() {
+    s_debugPanel = lv_obj_create(lv_scr_act());
+    // 高度主动避开屏幕最下方那段不响应触摸的屏蔽区（和书列表页同一个思路）
+    lv_obj_set_size(s_debugPanel, SCR_W - 8, SCR_H - TITLE_H - DEBUG_BTN_BOTTOM - 6);
+    lv_obj_align(s_debugPanel, LV_ALIGN_TOP_MID, 0, TITLE_H + 4);
+    lv_obj_set_style_radius(s_debugPanel, 6, 0);
+    lv_obj_set_style_border_width(s_debugPanel, 1, 0);
+    lv_obj_set_style_border_color(s_debugPanel, lv_color_hex(0x90A0B0), 0);
+    lv_obj_set_style_pad_all(s_debugPanel, 4, 0);
+    lv_obj_set_style_pad_row(s_debugPanel, 4, 0);
+    lv_obj_set_style_bg_color(s_debugPanel, lv_color_hex(0xF7F8FA), 0);
+    lv_obj_set_style_bg_opa(s_debugPanel, LV_OPA_COVER, 0);
+
+    // 只允许竖直滚动（硬性要求：全工程禁止左右滑动）
+    lv_obj_set_scroll_dir(s_debugPanel, LV_DIR_VER);
+    lv_obj_set_scrollbar_mode(s_debugPanel, LV_SCROLLBAR_MODE_AUTO);
+    lv_obj_add_flag(s_debugPanel, LV_OBJ_FLAG_SCROLL_MOMENTUM);
+    lv_obj_set_flex_flow(s_debugPanel, LV_FLEX_FLOW_COLUMN);
+    lv_obj_set_flex_align(s_debugPanel, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START,
+                          LV_FLEX_ALIGN_START);
+    lv_obj_add_flag(s_debugPanel, LV_OBJ_FLAG_HIDDEN);   // 默认隐藏，翻到第 6 页才显示
+
+    // ---- 正文：中文多行，跟着容器一起滚 ----
+    s_debugText = lv_label_create(s_debugPanel);
+    lv_obj_set_style_text_font(s_debugText, DISPLAY_FONT_CJK, 0);
+    lv_obj_set_style_text_color(s_debugText, lv_color_hex(COLOR_TEXT), 0);
+    lv_label_set_long_mode(s_debugText, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(s_debugText, LV_PCT(100));
+    lv_obj_clear_flag(s_debugText, LV_OBJ_FLAG_SCROLLABLE);
+    lv_label_set_text(s_debugText, "调试页启动中...");
+
+    // ---- 按钮：宽度按"一行放几个"算出来，全部禁止自己滚动 ----
+    const int32_t wFull = SCR_W - 8 - 8;       // 容器内宽（左右各 4 的内边距）
+    const int32_t wHalf = (wFull - 4) / 2;
+    const int32_t wThird = (wFull - 8) / 3;
+
+    // 升降 / 推书：两个方向各一行，蓝色
+    lv_obj_t *rowLift = makeDebugRow(s_debugPanel, DEBUG_ROW_H);
+    lv_obj_t *btnLiftUp = makeDebugButton(rowLift, "升降上移", wHalf, 0x0088FF);
+    lv_obj_t *btnLiftDown = makeDebugButton(rowLift, "升降下移", wHalf, 0x0088FF);
+
+    lv_obj_t *rowPush = makeDebugRow(s_debugPanel, DEBUG_ROW_H);
+    lv_obj_t *btnPushFwd = makeDebugButton(rowPush, "推书前进", wHalf, 0x0088FF);
+    lv_obj_t *btnPushBack = makeDebugButton(rowPush, "推书后退", wHalf, 0x0088FF);
+
+    // 急停：单独一行占满宽度 + 红色，出事时不用在按钮堆里找
+    lv_obj_t *rowStop = makeDebugRow(s_debugPanel, DEBUG_ROW_H);
+    lv_obj_t *btnStop = makeDebugButton(rowStop, "停止", wFull, 0xD02020);
+
+    // 点动步长三档：当前档的颜色在 showDebugPage() 里刷成橙色
+    lv_obj_t *rowJog = makeDebugRow(s_debugPanel, DEBUG_ROW_H);
+    s_jogBtn[0] = makeDebugButton(rowJog, "小10步", wThird, 0x607080);
+    s_jogBtn[1] = makeDebugButton(rowJog, "中100步", wThird, 0x607080);
+    s_jogBtn[2] = makeDebugButton(rowJog, "大500步", wThird, 0x607080);
+
+    // 零点 / 保存
+    lv_obj_t *rowZero = makeDebugRow(s_debugPanel, DEBUG_ROW_H);
+    lv_obj_t *btnSetZero = makeDebugButton(rowZero, "设为零点", wHalf, 0x109050);
+    lv_obj_t *btnSaveNow = makeDebugButton(rowZero, "保存位置", wHalf, 0x109050);
+
+    // 清空书籍数据（破坏性操作，必须二次确认，见 onBtnDebugClearBooks）
+    lv_obj_t *rowClear = makeDebugRow(s_debugPanel, DEBUG_ROW_H);
+    s_btnClearBooks = makeDebugButton(rowClear, "清空书籍", wFull, 0xD02020);
+
+    // 返回状态页
+    lv_obj_t *rowBack = makeDebugRow(s_debugPanel, DEBUG_ROW_H);
+    lv_obj_t *btnBack = makeDebugButton(rowBack, "返回", wFull, 0x0070C0);
+
+    // 事件回调：全部只"投意图"（入队 / 改点动步长），一行 GPIO 都不碰
+    lv_obj_add_event_cb(btnLiftUp, onBtnDebugLiftUp, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(btnLiftDown, onBtnDebugLiftDown, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(btnPushFwd, onBtnDebugPushForward, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(btnPushBack, onBtnDebugPushBack, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(btnStop, onBtnDebugStop, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(s_jogBtn[0], onBtnDebugJogSmall, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(s_jogBtn[1], onBtnDebugJogMid, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(s_jogBtn[2], onBtnDebugJogLarge, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(btnSetZero, onBtnDebugSetZero, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(btnSaveNow, onBtnDebugSaveNow, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(s_btnClearBooks, onBtnDebugClearBooks, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(btnBack, onBtnDebugBack, LV_EVENT_CLICKED, nullptr);
+
+    // ---- 状态页/书列表页右下角的"调试"入口 ----
+    // 位置固定：底边躲开最下方那段不响应触摸的屏蔽区；书列表容器也已经让出了这段高度，
+    // 所以它不会压住每行右边的"取出"按钮。只在状态页/书列表页显示（update() 里控制）。
+    s_btnDebugEnter = lv_btn_create(lv_scr_act());
+    lv_obj_set_size(s_btnDebugEnter, DEBUG_BTN_W, DEBUG_BTN_H);
+    lv_obj_align(s_btnDebugEnter, LV_ALIGN_BOTTOM_RIGHT, -6, -(DEBUG_BTN_BOTTOM));
+    lv_obj_set_style_radius(s_btnDebugEnter, 6, 0);
+    lv_obj_set_style_bg_color(s_btnDebugEnter, lv_color_hex(0x0070C0), 0);
+    lv_obj_clear_flag(s_btnDebugEnter, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *enterLabel = lv_label_create(s_btnDebugEnter);
+    lv_obj_set_style_text_font(enterLabel, DISPLAY_FONT_CJK, 0);
+    lv_obj_set_style_text_color(enterLabel, lv_color_white(), 0);
+    lv_label_set_text(enterLabel, "调试");
+    lv_obj_center(enterLabel);
+    lv_obj_clear_flag(enterLabel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_btnDebugEnter, onBtnEnterDebug, LV_EVENT_CLICKED, nullptr);
+
+    // 两个入口都默认藏起来，update() 里按当前页决定显示谁
+    objSetHidden(s_debugPanel, true);
+    objSetHidden(s_btnDebugEnter, true);
+
+    Serial.println("调试: 调试页(第 6 页)已建好, 入口在状态页/书列表页右下角");
+}
+
+// =============================================================================
+// 调试页刷新：只吃 DebugState 快照，不读成员业务数据
+// （和别的页面一样：update() 里加锁取快照，锁外画屏）
+// =============================================================================
+void DisplayLib::showDebugPage(const DebugState &st) {
+    char body[CFG_STATUS_TEXT_LEN];
+    char order[96];       // 和 DebugState::bookOrder 同宽
+    char reason[64];      // 和 DebugState::lastError 同宽
+    char savedInfo[32];   // 和 DebugState::lastSavedInfo 同宽
+    char note[64];        // 和 DebugState::note 同宽
+
+    // 这几段文字是别的任务填的，上屏前统一把字库里没有的字符换掉（原因见 sanitizeForFont）
+    sanitizeForFont(st.bookOrder, order, sizeof(order));
+    sanitizeForFont(st.lastError, reason, sizeof(reason));
+    sanitizeForFont(st.lastSavedInfo, savedInfo, sizeof(savedInfo));
+    sanitizeForFont(st.note, note, sizeof(note));
+    if (order[0] == '\0') {
+        snprintf(order, sizeof(order), "空");
+    }
+    if (reason[0] == '\0') {
+        snprintf(reason, sizeof(reason), "无");
+    }
+    if (savedInfo[0] == '\0') {
+        snprintf(savedInfo, sizeof(savedInfo), "无");
+    }
+    if (note[0] == '\0') {
+        snprintf(note, sizeof(note), "无");
+    }
+
+    // 一行一个信息，顺序按"调试时最想先看什么"排：位置/归零排在最前面，出事第一眼能看到
+    snprintf(body, sizeof(body),
+             "调试页 第6页  点动 %d 步/次\n"
+             "位置: %s%s\n"
+             "升降: 累计 %ld 步\n"
+             "  剩余 %ld 步  软限位 %ld\n"
+             "  状态 %s\n"
+             "推书: 本次 %ld 步  状态 %s\n"
+             "测距: %lu mm  %s  错误码 %u\n"
+             "书单: %u 条\n"
+             "顺序: %s\n"
+             "动作: %s\n"
+             "原因: %s\n"
+             "Flash: %s (%s)\n"
+             "备注: %s",
+             (unsigned)st.jogSteps,
+             st.positionValid ? "有效" : "无效",
+             st.needHoming ? "  *需要人工归零*" : "",
+             (long)st.liftSteps,
+             (long)st.liftLeft, (long)st.liftRange,
+             st.liftMoving ? "在走" : "停",
+             (long)st.pushSteps, st.pushMoving ? "在走" : "停",
+             (unsigned long)st.waveMm, st.waveValid ? "有效" : "无效",
+             (unsigned)st.waveError,
+             (unsigned)st.bookNum,
+             order,
+             st.lastActionOk ? "上次正常结束" : "上次失败",
+             reason,
+             st.flashSaved ? "已保存" : "未保存", savedInfo,
+             note);
+
+    if (s_debugText != nullptr) {
+        lv_label_set_text(s_debugText, body);
+    }
+    objSetHidden(s_barValue, true);
+
+    // 步长按钮高亮：当前档橙色，其余灰，一眼就知道下一脚走多远
+    for (uint8_t i = 0; i < 3; i++) {
+        if (s_jogBtn[i] == nullptr) {
+            continue;
+        }
+        bool active = ((i == 0) && (st.jogSteps == CFG_DEBUG_JOG_SMALL)) ||
+                      ((i == 1) && (st.jogSteps == CFG_DEBUG_JOG_MID)) ||
+                      ((i == 2) && (st.jogSteps == CFG_DEBUG_JOG_LARGE));
+        lv_obj_set_style_bg_color(s_jogBtn[i],
+                                  lv_color_hex(active ? 0xE08000 : 0x607080), 0);
+    }
+
+    // 清空书籍按钮的文字跟着"是否已上膛"走（serviceDebugConfirm() 超时后会改回来）
+    if (s_btnClearBooks != nullptr) {
+        lv_obj_t *label = lv_obj_get_child(s_btnClearBooks, 0);
+        if (label != nullptr) {
+            lv_label_set_text(label, s_clearArmed ? "再点一次确认清空" : "清空书籍");
+        }
+    }
+}
+
+// =============================================================================
+// 清空书单的二次确认超时回收
+//
+// 不在事件回调里做计时（回调只投意图）：每轮刷新前查一眼，
+// 超时就把按钮文字改回"清空书籍"，下次点又要点两下。
+// =============================================================================
+void DisplayLib::serviceDebugConfirm() {
+    if (!s_clearArmed) {
+        return;
+    }
+    if ((int32_t)(millis() - s_clearArmUntil) < 0) {
+        return;
+    }
+    debugClearArm(false);
+    Serial.println("调试: 清空书籍的确认超时，已自动取消");
+}
+

@@ -1,0 +1,18 @@
+{
+    "name": "storagelib",
+    "version": "1.0.0",
+    "description": "SmartBookShelf 存储库：用 ESP32-S3 内部 Flash 的 NVS(Preferences) 持久化书单与升降位置，带数据版本校验、逐条校验和掉电恢复（未完成动作标记）。",
+    "keywords": "esp32, nvs, preferences, flash, storage, persist, esp32-s3",
+    "authors": [
+        {
+            "name": "SmartBookShelf",
+            "maintainer": true
+        }
+    ],
+    "license": "MIT",
+    "frameworks": "arduino",
+    "platforms": "espressif32",
+    "build": {
+        "srcDir": "src"
+    }
+}
