@@ -718,7 +718,8 @@ static void cmdDebug(const char *arg) {
 //    原来存书要先把升降移到"待存书位置"，现在**取消了这一步** ——
 //    摄像头在整叠书正上方、书从顶部开口放进去，存书时升降不该动。
 #define FLOW_STORE_LIFT_HOME   2   // （废弃，不再使用）
-#define FLOW_STORE_WAIT_BOOK   3   // 等用户把书放好并确认
+#define FLOW_STORE_WAIT_BOOK   3   // 等用户把书放好并确认（自动模式下靠二哈判断，基本是瞬间）
+#define FLOW_STORE_MOVE_DOWN   7   // 存完一本后：整叠书向下让 125 步，保持投书位置不变
 #define FLOW_TAKE_LIFT         4   // 升降把目标书对准出书口
 #define FLOW_TAKE_PUSH         5   // 推书推出
 #define FLOW_TAKE_RETRACT      6   // 推书回退（可选）
@@ -756,6 +757,7 @@ static uint8_t flowRetry = 0;             // 通用重试/阶段计数
 
 static uint32_t flowDeadlineMs = 0;       // 流程级超时
 static uint32_t flowWaitStartMs = 0;      // 开始"等放书确认"的时刻（给界面算倒计时）
+static bool flowDownStarted = false;      // 存书后"向下让一本书"是否已经发过请求
 
 // 把"目标书的升降位置"算出来
 //
@@ -835,12 +837,17 @@ static void flowStepStore() {
             Serial.println("      注意: 存书不动升降机构, 书直接从顶部开口放进去");
             notify("请把书从顶部放入，然后确认入库", CFG_MESSAGE_HOLD_MS);
 
-            // ⚠️ 机械上**没有**"书已放入"的检测手段（没有对射/微动开关），
-            //    所以不能虚构自动检测，只能明确地等用户确认。
-            //    但"等确认"本身也算一次未完成的存书动作，所以照样在 Flash 里记标记，
-            //    这样万一在等待期间断电，复位后能看出"上次存书没走完"。
-            storage.markActionPending();
+            // ⚠️ 【"书已放入"是怎么判断的】
+            //    硬件上没有对射/微动开关，但有**二哈摄像头固定在整叠书正上方**。
+            //    用户把书从顶部开口放进去 -> 二哈看到它 -> 识别到合法分类 ID。
+            //    所以这里的判断就是：**等待"识别到分类 ID"**，而不是等用户按键。
+            //    识别任务看到稳定 ID 后会投 MECH_REQ_CONFIRM_STORE，把下面这个标志置上。
+            //
+            //    ⚠️ 诚实说明：这不是"检测到书这个物体"，而是"二哈认出了这本书的学科标签"。
+            //       如果放进一本二哈认不出来的书，流程会一直等到超时然后自动取消。
             storeWaitingConfirm = true;
+            // 注意：这里**不**写 markActionPending() —— 此刻还没有任何机械动作；
+            //       真正的动作（下移 125 步）在 FLOW_STORE_MOVE_DOWN 里，那里才打标记。
             flowWaitStartMs = millis();
             flowDeadlineMs = flowWaitStartMs + CFG_BOOK_PLACE_TIMEOUT_MS;
             flowState = FLOW_STORE_WAIT_BOOK;
@@ -864,9 +871,18 @@ static void flowStepStore() {
                                   getBookNameById(flowStoreId), (int)newIndex,
                                   (int)display.bookCount());
                     notify("入库成功", CFG_MESSAGE_HOLD_MS);
-                    storage.clearActionPending();   // 存书动作正常收尾，清掉未完成标记
                     saveAllToFlash("新书入库");
+
+                    // ---- 存完一本，整叠书向下让 125 步 ----
+                    // 为什么必须让：平台向下走一本书的距离后，**投书/出书开口的位置不变**，
+                    // 下一本还能从同一个开口放进来；同时新书稳稳落在书堆最顶上（下标 0）。
+                    // 方向用独立的 CFG_STORE_DOWN_SIGN，避免被 CFG_LIFT_DIR_SIGN 的两次相乘绕晕。
+                    storage.markActionPending();   // 机械动作前先落盘"未完成"
+                    storeConfirmRequested = false;
+                    flowState = FLOW_STORE_MOVE_DOWN;
+                    break;
                 }
+                // 入库失败：不改机械位置，直接收尾
                 flowStoreId = -1;
                 flowState = FLOW_IDLE;
                 break;
@@ -883,6 +899,60 @@ static void flowStepStore() {
                 flowStoreId = -1;
                 flowState = FLOW_IDLE;
             }
+            break;
+        }
+
+        // ---- 存书收尾：整叠书向下让一本书，保持投书位置不变 ----
+        case FLOW_STORE_MOVE_DOWN: {
+            // 第一次进来：把下移请求发出去（用点动接口，方向由 CFG_STORE_DOWN_SIGN 决定）
+            if (!flowDownStarted) {
+                flowDownStarted = true;
+                int32_t downSteps = -(int32_t)CFG_LIFT_STEPS_PER_BOOK;
+                if (CFG_STORE_DOWN_SIGN < 0) {
+                    downSteps = -downSteps;
+                }
+                Serial.printf("存书: 整叠书下移一本书 %d 步（让出投书位置）\n",
+                              CFG_LIFT_STEPS_PER_BOOK);
+                // allowInvert=true：这里是刻意反方向走，不是"误操作回退"
+                if (!mechanism.jog(MECH_AXIS_LIFT, downSteps, true)) {
+                    Serial.printf("存书: ⚠️ 下移动作被拒绝 —— %s\n",
+                                  mechanism.lastErrorText());
+                    Serial.println("      书已经记进数组了，但这一本没有让位；");
+                    Serial.println("      下一本请先手动 g,down 让位，或检查软限位。");
+                    notify("书已入库，但下移失败，请手动让位", CFG_MESSAGE_HOLD_MS);
+                    storage.clearActionPending();
+                    flowDownStarted = false;
+                    flowStoreId = -1;
+                    flowState = FLOW_IDLE;
+                    break;
+                }
+                break;   // 等它走完，下一轮再看
+            }
+
+            // 等升降走完
+            MechResult res;
+            if (!mechanism.takeResult(res)) {
+                break;   // 还在走，下一轮再看（不阻塞）
+            }
+            if (!res.ok) {
+                // ⚠️ 下移没走完：书已经入库了，但机构位置和记录可能对不上
+                Serial.printf("存书: ❌ 下移没有正常完成 —— %s\n",
+                              mechanism.lastErrorText());
+                notify("下移异常，位置需重新归零", CFG_MESSAGE_HOLD_MS);
+                storage.clearActionPending();
+                flowDownStarted = false;
+                flowStoreId = -1;
+                flowState = FLOW_IDLE;
+                break;
+            }
+
+            storage.clearActionPending();
+            saveAllToFlash("存书下移到位");
+            Serial.printf("存书: 下移完成, 当前升降位置=%ld 步, 准备接下一本\n",
+                          (long)mechanism.liftSteps());
+            flowDownStarted = false;
+            flowStoreId = -1;
+            flowState = FLOW_IDLE;
             break;
         }
 
@@ -1210,7 +1280,8 @@ static void stepperTask(void *pvParameters) {
         }
 
         // ---- ⑤ 推进流程状态机 ----
-        if (flowState == FLOW_STORE_CHECK || flowState == FLOW_STORE_WAIT_BOOK) {
+        if (flowState == FLOW_STORE_CHECK || flowState == FLOW_STORE_WAIT_BOOK ||
+            flowState == FLOW_STORE_MOVE_DOWN) {
             flowStepStore();
         } else if (flowState == FLOW_TAKE_LIFT || flowState == FLOW_TAKE_PUSH ||
                    flowState == FLOW_TAKE_RETRACT) {
@@ -1784,6 +1855,31 @@ static void recogTask(void *pvParameters) {
             } else {
                 // 取第一个识别块（分类算法下通常只有 1 个）
                 int16_t id = (int16_t)frame.words[0].id;
+
+                // =============================================================
+                // ⚠️ 【"书已放入"的自动判断就在这里】
+                //
+                //   用户把书从顶部放进书堆 -> 二哈（固定在整叠书正上方）看到它。
+                //   所以"正在等放书确认" + "识别到合法分类 ID" == 书已经放进去了。
+                //   这里立刻投一条自动确认，**不需要用户按任何键**。
+                //
+                //   ⚠️ 诚实说明：这不是"检测到书这个物体"，而是"二哈认出了它的学科标签"。
+                //      放进一本二哈认不出的书，流程会等到超时自动取消（不会乱记录）。
+                //   ⚠️ flowState 由 stepperTask 写、这里读，是"跨任务读一个字节"。
+                //      最坏情况是读到上一拍的旧值 -> 晚一帧确认，不会做错事，所以没有加锁。
+                // =============================================================
+#if CFG_BOOK_AUTO_CONFIRM
+                if (flowState == FLOW_STORE_WAIT_BOOK && bookIdIsValid(id)) {
+                    // 队列满就等下一帧再投，不影响已有流程
+                    if (postMechRequest(MECH_REQ_CONFIRM_STORE, (int32_t)id)) {
+                        Serial.printf("识别: 自动判断为\"书已放入\" -> 自动确认入库 %s(ID=%d)\n",
+                                      getBookNameById(id), (int)id);
+                    }
+                }
+#else
+                // CFG_BOOK_AUTO_CONFIRM=0：不自动确认，等用户按 A 键或串口 v,c
+                (void)id;
+#endif
 
                 // 每帧都记诊断信息，串口命令 j 一眼看出卡在哪一步
                 recogLastId = id;
