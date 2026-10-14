@@ -576,6 +576,70 @@ def main():
     check("每本书步数 = 125 步(已标定值)", CFG_LIFT_STEPS_PER_BOOK == 125)
     check("存书下移方向宏存在且为 ±1", CFG_STORE_DOWN_SIGN in (1, -1))
 
+    # ---------------- H. 位置持久化模型（base + offset）----------------
+    print("\n[H] 位置持久化模型：开机不抹掉历史值，位移才累加")
+
+    # 对应 main.cpp 里的位置持久化模型：
+    #   要写进 Flash 的值 = g_persistBase + g_pendingPosOffset
+    #   base   = 加载时从 Flash 读到的历史值
+    #   offset = 加载之后相对"加载时刻机构位置"的累计位移
+    # 修复的 bug: applyLoadedPosition() 会把 mechanism.liftSteps() 清 0，
+    #             如果自动保存直接存 mechanism.liftSteps()，
+    #             Flash 里的 300 会被立刻覆盖成 0（用户看到"300 怎么变了"）。
+    class Persist:
+        def __init__(self):
+            self.base = 0          # g_persistBase
+            self.offset = 0        # g_pendingPosOffset
+            self.last_saved = 0    # lastSavedLiftSteps
+
+        def value(self):
+            return self.base + self.offset
+
+        def load_from_flash(self, steps):
+            # 对应 q,l / 开机加载后的记账
+            self.base = steps
+            self.offset = 0
+            self.last_saved = steps
+
+        def on_delta(self, d):
+            self.offset += d
+
+        def auto_save_if_changed(self):
+            # 对应"位置 != 上次保存值 就补写"的兜底路径
+            if self.value() != self.last_saved:
+                saved = self.value()
+                self.base = saved      # commitPersistAccounting()
+                self.offset = 0
+                self.last_saved = saved
+                return saved
+            return None
+
+        def zero_here(self):
+            # 人工归零 = 零点重建：base 和 offset 都清 0
+            self.base = 0
+            self.offset = 0
+            self.last_saved = 0
+        
+    p = Persist()
+    p.load_from_flash(300)
+    check("加载 300 后，待写值 = 300（不是 0）", p.value() == 300, str(p.value()))
+    check("加载后什么都不做 -> 不需要保存（历史值不会被抹掉）",
+          p.auto_save_if_changed() is None)
+    p.on_delta(100)
+    check("机构走 +100 -> 待写值 = 400", p.value() == 400, str(p.value()))
+    check("变化后确实触发一次保存，且写入 400", p.auto_save_if_changed() == 400)
+    check("保存后 base=400 offset=0（记账已滚动）",
+          p.base == 400 and p.offset == 0)
+    check("再保存一次不会重复写", p.auto_save_if_changed() is None)
+    p.on_delta(-125)
+    check("机构反向走 125 -> 待写值 = 275", p.value() == 275, str(p.value()))
+    p.auto_save_if_changed()
+    check("反向位移也正确落盘", p.base == 275 and p.offset == 0)
+    p.zero_here()
+    check("人工归零后 base=offset=0", p.value() == 0)
+    p.on_delta(100)
+    check("归零后再走 100 -> 待写值 = 100（不背历史包袱）", p.value() == 100, str(p.value()))
+
     # ---------------- 汇总 ----------------
     print("")
     print("=" * 70)

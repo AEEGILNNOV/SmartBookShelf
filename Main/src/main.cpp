@@ -174,7 +174,29 @@ static const char *MOTOR_NAME[2] = { "升降", "推书" };
 //    28BYJ 一分钟好几百步，每步都写 NVS 的话 Flash 很快就被写坏了。
 static bool mechWasBusy = false;      // 上一轮机械是否在动（用来找下降沿）
 static bool autoSavedThisMove = false;// 本次动作是否已经自动保存过（防重复写）
-static int32_t lastSavedLiftSteps = 0;// 上一次已经写进 Flash 的升降步数（兜底用）
+// =============================================================================
+// 【位置持久化模型 —— 为什么不能直接存 mechanism.liftSteps()】
+//
+//   实机踩到的坑: 开机 / q,l 加载读到 "升降 300 步"，但紧接着自动保存把
+//   mechanism.liftSteps() 写回去 —— 而 applyLoadedPosition() 刚把机构计数清成了 0，
+//   于是 Flash 立刻被覆盖成 0。用户看到的就是"300 怎么变 0 了，根本没读进去"。
+//
+//   为什么 300 是对的、不该丢:
+//     300 是上一次人工归零之后建立的位置基准（"这个位置我认作零点"，软件记 0）。
+//     掉电重启后真实世界没变，机构还在同一个物理位置，所以 300 仍然是有效的位置信息。
+//     applyLoadedPosition() 把软件计数清 0，是因为开环系统只能把"当前"当基准；
+//     但 Flash 里那份历史值不该被自动保存覆盖掉。
+//
+//   模型: 要写进 Flash 的值 = base + offset
+//     base   = 加载时从 Flash 读到的那个值（本次上电之前的历史）
+//     offset = 加载之后、相对于"加载时刻机构位置"的累计位移（带符号）
+//   机构每动一次 offset 就累加一次；每次成功保存后 offset 归零、base 变成刚存的值。
+//   人工归零时 base 和 offset 都清 0（零点重建了）。
+// =============================================================================
+static int32_t g_persistBase = 0;      // 加载时的历史步数（或上次保存后的值）
+static int32_t g_pendingPosOffset = 0; // 加载之后累计的机构位移
+static int32_t g_mechPosAtLastSave = 0;// 上次保存时刻的 mechanism.liftSteps()（用来算 delta）
+static int32_t lastSavedLiftSteps = 0; // = g_persistBase + g_pendingPosOffset（兜底比对用）
 static uint32_t lastAutoSaveMs = 0;   // 上一次自动保存的时刻（兜底限流，别写太勤）
 
 // -----------------------------------------------------------------------------
@@ -356,6 +378,28 @@ static void printBookList() {
     display.printBooks();
 }
 
+// 当前应该写进 Flash 的升降步数（= 历史基准 + 本次累计位移）
+static int32_t persistedLiftSteps() {
+    return g_persistBase + g_pendingPosOffset;
+}
+
+// 机构位置变了多少：返回"本次相对于上次记账点的位移"，并把记账点推到现在。
+// 只要机构真的动过，调用它就能拿到带符号的位移量。
+static int32_t takeMechanismDelta() {
+    int32_t now = mechanism.liftSteps();
+    int32_t delta = now - g_mechPosAtLastSave;
+    g_mechPosAtLastSave = now;
+    return delta;
+}
+
+// 保存成功后统一记账：base 变成刚写进去的值，offset 归零。
+static void commitPersistAccounting(int32_t savedValue) {
+    g_persistBase = savedValue;
+    g_pendingPosOffset = 0;
+    g_mechPosAtLastSave = mechanism.liftSteps();
+    lastSavedLiftSteps = savedValue;
+}
+
 // -----------------------------------------------------------------------------
 // Flash 保存：书单 + 升降步数 + 位置状态 一次全写
 //
@@ -367,13 +411,15 @@ static bool saveAllToFlash(const char *why) {
     bool needHoming = mechanism.needHoming();
     bool positionValid = mechanism.positionValid();
 
-    bool ok = storage.saveAll(g_books, mechanism.liftSteps(),
-                              positionValid, needHoming);
+    // ⚠️ 存的是 persistedLiftSteps()，**不是** mechanism.liftSteps()：
+    //    后者在加载之后是 0（软件计数被清过），直接存会把 Flash 里的历史值抹掉。
+    int32_t steps = persistedLiftSteps();
+    bool ok = storage.saveAll(g_books, steps, positionValid, needHoming);
     if (ok) {
+        commitPersistAccounting(steps);
         Serial.printf("存储: 已保存 (%s) 书单=%d 本, 升降步数=%ld, 位置有效=%s, 需要归零=%s\n",
-                      why, (int)display.bookCount(),
-                      (long)mechanism.liftSteps(), positionValid ? "是" : "否",
-                      needHoming ? "是" : "否");
+                      why, (int)display.bookCount(), (long)steps,
+                      positionValid ? "是" : "否", needHoming ? "是" : "否");
     } else {
         Serial.printf("存储: ❌ 保存失败 (%s), 看上面 StorageLib 的日志\n", why);
     }
@@ -1182,11 +1228,18 @@ static void stepperTask(void *pvParameters) {
                     if (flowState != FLOW_IDLE) {
                         Serial.println("机械: 拒绝点动 —— 存书/取书流程正在进行");
                         snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", "流程进行中，暂不接受点动");
-                    } else if (!mechanism.jog(MECH_AXIS_LIFT, req.arg, true,
-                                              req.raw != 0)) {
-                        Serial.printf("机械: 升降点动被拒绝 —— %s\n",
-                                      mechanism.lastErrorText());
-                        snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", mechanism.lastErrorText());
+                    } else {
+                        int32_t posBefore = mechanism.liftSteps();
+                        bool started = mechanism.jog(MECH_AXIS_LIFT, req.arg, true,
+                                                     req.raw != 0);
+                        // ⚠️ jog() 里会调用 run()，而 _posSteps 是从"当前位置"继续累加的，
+                        //    所以这里用 (当前位置 - 起跳前位置) 就能拿到本次真实位移。
+                        g_pendingPosOffset += (mechanism.liftSteps() - posBefore);
+                        if (!started) {
+                            Serial.printf("机械: 升降点动被拒绝 —— %s\n",
+                                          mechanism.lastErrorText());
+                            snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", mechanism.lastErrorText());
+                        }
                     }
                     break;
 
@@ -1194,11 +1247,16 @@ static void stepperTask(void *pvParameters) {
                     if (flowState != FLOW_IDLE) {
                         Serial.println("机械: 拒绝点动 —— 存书/取书流程正在进行");
                         snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", "流程进行中，暂不接受点动");
-                    } else if (!mechanism.jog(MECH_AXIS_PUSH, req.arg, true,
-                                              req.raw != 0)) {
-                        Serial.printf("机械: 推书点动被拒绝 —— %s\n",
-                                      mechanism.lastErrorText());
-                        snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", mechanism.lastErrorText());
+                    } else {
+                        int32_t posBefore = mechanism.liftSteps();
+                        bool started = mechanism.jog(MECH_AXIS_PUSH, req.arg, true,
+                                                     req.raw != 0);
+                        g_pendingPosOffset += (mechanism.liftSteps() - posBefore);
+                        if (!started) {
+                            Serial.printf("机械: 推书点动被拒绝 —— %s\n",
+                                          mechanism.lastErrorText());
+                            snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", mechanism.lastErrorText());
+                        }
                     }
                     break;
 
@@ -1212,8 +1270,11 @@ static void stepperTask(void *pvParameters) {
                 case MECH_REQ_SET_ZERO:
                     if (mechanism.setZeroHere()) {
                         // 归零后立刻落盘：这是"位置基准"的来源，必须马上记住
+                        // 归零 = 零点重建：历史基准和累计位移都清 0
+                        g_persistBase = 0;
+                        g_pendingPosOffset = 0;
+                        g_mechPosAtLastSave = mechanism.liftSteps();
                         saveAllToFlash("人工归零");
-                        lastSavedLiftSteps = mechanism.liftSteps();   // 同步记账，避免兜底再写一次
                         lastAutoSaveMs = millis();
                         notify("已把当前位置设为零点", CFG_MESSAGE_HOLD_MS);
                     } else {
@@ -1284,7 +1345,7 @@ static void stepperTask(void *pvParameters) {
                 needSave = true;
                 saveWhy = "机械已停止";
             } else if (!autoSavedThisMove &&
-                       mechanism.liftSteps() != lastSavedLiftSteps &&
+                       persistedLiftSteps() != lastSavedLiftSteps &&
                        (nowMs - lastAutoSaveMs) >= CFG_AUTO_SAVE_MIN_INTERVAL_MS) {
                 // ---- 路径 2（兜底）：位置和"上次已经写进 Flash 的值"不一样 ----
                 //
@@ -1298,11 +1359,11 @@ static void stepperTask(void *pvParameters) {
             }
 
             if (needSave) {
-                int32_t pos = mechanism.liftSteps();
+                int32_t pos = persistedLiftSteps();
                 storage.saveLiftSteps(pos);
                 storage.savePositionState(mechanism.positionValid(),
                                           mechanism.needHoming());
-                lastSavedLiftSteps = pos;
+                commitPersistAccounting(pos);
                 lastAutoSaveMs = nowMs;
                 Serial.printf("存储: %s, 自动保存位置 (%ld 步, 位置有效=%s)\n",
                               saveWhy, (long)pos,
@@ -1408,8 +1469,14 @@ static void cmdFlash(const char *arg) {
             //   于是 checkStoreRequest() 一直以"位置无效"拒绝存书请求 —— 用户看到的就是
             //   "书单能加载、但新书永远加不进去"。
             mechanism.applyLoadedPosition(steps, posValid, needHoming);
-            lastSavedLiftSteps = mechanism.liftSteps();   // 同步记账，避免兜底立刻又写一次
+            // 记账: base = 刚加载到的历史值，offset = 0（此刻机构位置就是基准点）
+            g_persistBase = steps;
+            g_pendingPosOffset = 0;
+            g_mechPosAtLastSave = mechanism.liftSteps();
+            lastSavedLiftSteps = steps;
             lastAutoSaveMs = millis();
+            Serial.printf("存储: 位置基准=%ld 步（加载值）, 后续位移在此基础上累加\n",
+                          (long)steps);
             printBookList();
         } else {
             Serial.println("存储: ❌ 加载失败(没数据/损坏/版本不匹配)，内存里的书单没有被动过");
@@ -2578,7 +2645,12 @@ void setup() {
         // ⚠️ 位数的语义：步数基准会被清 0（开环系统只能把"当前"当基准），
         //    所以这里恢复的"有效"指的是"零点基准可用"，不是"机构回到了 300 步那个位置"。
         mechanism.applyLoadedPosition(savedLiftSteps, savedPosValid, savedNeedHoming);
-        lastSavedLiftSteps = mechanism.liftSteps();
+        // 记账: base = 开机加载到的历史值，offset = 0
+        // ⚠️ 这样"开机后什么都不做"时，兜底自动保存不会把 Flash 里的历史值抹成 0。
+        g_persistBase = savedLiftSteps;
+        g_pendingPosOffset = 0;
+        g_mechPosAtLastSave = mechanism.liftSteps();
+        lastSavedLiftSteps = savedLiftSteps;
         lastAutoSaveMs = millis();
     }
 
