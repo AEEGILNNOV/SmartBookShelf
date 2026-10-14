@@ -442,11 +442,18 @@ static bool saveAllToFlash(const char *why) {
 }
 
 // 界面提示：把一条消息同时写到屏幕和串口。
-// ⚠️ 需求要求"错误状态不能只打串口"，所以凡是用户可见的问题都走这里。
+// ⚠️ 原设计是"错误状态不能只打串口"，所以用户可见的问题都走这里。
+// ⚠️ 用户要求（本次）：**界面弹窗全部禁掉**（config.h 的 CFG_ENABLE_NOTIFY_POPUP = 0）——
+//    包括"已把当前位置设为零点"这类弹窗都不再出现，只保留串口日志。
+//    把那个宏改回 1 就恢复弹窗，不用动这里的代码。
 static void notify(const char *text, uint32_t ms) {
+#if CFG_ENABLE_NOTIFY_POPUP
     if (CFG_RUN_DISPLAY) {
         display.showMessage(text, ms);
     }
+#else
+    (void)ms;   // 关掉弹窗后 ms 没人用，显式忽略，避免编译告警
+#endif
     Serial.printf("提示: %s\n", text);
 }
 
@@ -1986,7 +1993,9 @@ static void handleDebugButton(uint8_t index, bool longPress) {
                 }
                 setDebugJogSteps(next);   // 只写数据，LVGL 那边自己会刷新
                 Serial.printf("调试页: 点动步长 -> %u 步\n", (unsigned)next);
+#if CFG_ENABLE_NOTIFY_POPUP
                 display.showMessage("点动步长已切换（看串口）", 1200);
+#endif
             } else {
                 display.nextPage();
                 Serial.printf("调试页: 下一页 -> %s\n", pageName(display.page()));
@@ -2786,7 +2795,9 @@ void setup() {
         display.begin();
         display.setDebugCmdHandler(handleDebugCmd);    // 调试页命令 -> MechQueue
         display.setDebugJogSteps(CFG_DEBUG_JOG_MID);   // 默认中等步长，最安全
+#if CFG_ENABLE_NOTIFY_POPUP
         display.showMessage("SmartBookShelf BOOT", (uint32_t)CFG_MESSAGE_HOLD_MS);
+#endif
     }
 
     // ---- 3) Flash：打开 NVS 并加载书单/位置 ----
