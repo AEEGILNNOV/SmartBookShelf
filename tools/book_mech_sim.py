@@ -39,9 +39,9 @@ CFG_LIFT_INDEX0_OFFSET_STEPS = 0
 CFG_LIFT_DIR_SIGN            = 1
 CFG_STORE_DOWN_SIGN          = -1     # 用户实机: 存书让位后位置从 +125 开始递增(与 config.h 一致)
 CFG_PUSH_DIR_SIGN            = -1   # 本机实测: 推出 = run() 负数, 拉回 = run() 正数
-CFG_PUSH_OUT_STEPS           = 875
+CFG_PUSH_OUT_STEPS           = 900
 CFG_STEPPER_LIFT_RANGE_STEPS = 4096
-CFG_STEPPER_PUSH_RANGE_STEPS = 2048
+CFG_STEPPER_PUSH_RANGE_STEPS = 0      # 推书不限位(用户要求)
 
 BOOK_ID_MIN, BOOK_ID_MAX = 1, 6
 BOOK_NAME = {1: "语文", 2: "数学", 3: "英语", 4: "物理", 5: "化学", 6: "生物"}
@@ -626,7 +626,7 @@ def main():
           str(mech2.lift.pos_steps))
     check("剩2本时取现在下标1(原最下面那本) -> 目标 0",
          target_of(1, 2) == 0, str(target_of(1, 2)))
-    check("推书行程 = 875 步(已标定值)", CFG_PUSH_OUT_STEPS == 875)
+    check("推书行程 = 900 步(用户标定值)", CFG_PUSH_OUT_STEPS == 900)
     check("每本书步数 = 125 步(已标定值)", CFG_LIFT_STEPS_PER_BOOK == 125)
     check("存书下移方向宏存在且为 ±1", CFG_STORE_DOWN_SIGN in (1, -1))
 

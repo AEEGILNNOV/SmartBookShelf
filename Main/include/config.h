@@ -1102,7 +1102,11 @@
 #define CFG_STEPPER_LIFT_RANGE_STEPS 4096    // 待标定：升降机构总行程(步)
 #endif
 #ifndef CFG_STEPPER_PUSH_RANGE_STEPS
-#define CFG_STEPPER_PUSH_RANGE_STEPS 2048    // 待标定：推书机构总行程(步)
+// ⚠️ 推书**不限位**（0 = 不限位，clampToRange 里 range<=0 直接放行）—— 用户要求删掉水平推出的限位。
+//    原因：推出 900 / 收回 1200，每取一本推书轴位置净漂 +300 步，有限位的话迟早被拦住。
+//    代价：位置会一直往一个方向漂，只能靠机械挡块或人工复位兜底；
+//    单次动作仍受 CFG_PUSH_MAX_MOVE_STEPS(2000) 和急停、互斥保护。
+#define CFG_STEPPER_PUSH_RANGE_STEPS 0
 #endif
 
 // 旧宏名兼容（旧 M1=推出 M2=夹层 M3=升降，语义已变，只给老代码兜底）
@@ -1214,9 +1218,9 @@
 
 // ---- 推书机构 ----
 
-// 推书行程：把书完全推出需要的步数（**实机标定值 = 875 步**）
+// 推书行程：把书完全推出需要的步数（**用户实机标定 = 900 步**）
 #ifndef CFG_PUSH_OUT_STEPS
-#define CFG_PUSH_OUT_STEPS 875
+#define CFG_PUSH_OUT_STEPS 900
 #endif
 
 // 推书回退：推出 -> 停住一段时间 -> 反向收回（取书流程固定走这三步）。
@@ -1225,12 +1229,13 @@
 #ifndef CFG_PUSH_AUTO_RETRACT
 #define CFG_PUSH_AUTO_RETRACT 1
 #endif
-// 回退步数：**用户标定 = 950**（比推出行程 875 多退 75 步）。
-// ⚠️ 多退的这 75 步会让推书轴的位置每取一本净漂 +75 步（推出 -875、收回 +950），
-//    大约 27 次取书后会顶到软限位 ±2048，之后 movePushOut() 可能到不了位。
-//    如果希望每次推完回到原位，把这里改回 875。
+// 回退步数：**用户标定 = 1200**（比推出行程 900 多退 300 步）。
+// ⚠️ 多退的这 300 步会让推书轴位置每取一本净漂 +300 步（推出 -900、收回 +1200）；
+//    推书软限位已经按用户要求删掉（CFG_STEPPER_PUSH_RANGE_STEPS = 0），
+//    所以不会被限位拦住，但位置会一直漂，需要机械挡块或偶尔人工复位。
+//    若要每次推完回原位，把这里改回 900（= 推出行程）。
 #ifndef CFG_PUSH_RETRACT_STEPS
-#define CFG_PUSH_RETRACT_STEPS 950
+#define CFG_PUSH_RETRACT_STEPS 1200
 #endif
 
 // ==== 取书流程：推出后先"停住"多久再回退(ms) ====
