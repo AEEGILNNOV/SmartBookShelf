@@ -17,6 +17,10 @@ __pycache__/
 # DSH 沙箱 ACL 报告（本机运行产物）
 .acl-report/
 
+# 临时暂存文件（写大文件时用来中转，不该提交）
+.stage_*
+.tmp_*
+
 # 编辑器 / 系统
 .DS_Store
 Thumbs.db

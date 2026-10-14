@@ -185,6 +185,8 @@ static void cmdBookFlow(const char *arg);
 static Stepper28BYJ *getMotor(int index);
 static bool postMechRequest(uint8_t cmd, int32_t arg);
 static void handleDebugCmd(uint8_t cmd, int16_t arg);
+static void handleDebugButton(uint8_t index, bool longPress);
+static const char *pageName(uint8_t page);
 
 // -----------------------------------------------------------------------------
 // 工具函数
@@ -1398,23 +1400,175 @@ static void registerCommands() {
 }
 
 // -----------------------------------------------------------------------------
-// 按键事件 -> 命令
+// 长按判定时间(ms)：超过这个时间算长按
 //
-// 按键定义（**本次没有新增按键 GPIO**，沿用 config.h 第 5 节）：
-//   按键1 = 下一页        按键2 = 重新连接二哈     按键3 = 学习当前目标
-//   A 键  = 存书确认 / 请求存书（说明书里的"还书"）
-//   B 键  = 取书请求（说明书里的"借书"）
-// A/B 默认引脚是 -1（没接），要接线就把 config.h 的 BUTTON_PIN4/BUTTON_PIN5 改成实际引脚。
+// ⚠️ 为什么不用 config.h 里的 BUTTON_LONG_PRESS_MS：
+//    那个宏是 ButtonLib 的，而当前 ButtonLib 实现里短按和长按**都只发一个"按下"事件**，
+//    没有把时长传出来。所以这里自己按"按下时刻 -> 松开时刻"的差值来判长按。
+//    按键事件在 loop() 里收，松开事件也会进队列，判长按不需要阻塞等待。
+#ifndef CFG_BUTTON_LONG_PRESS_MS
+#define CFG_BUTTON_LONG_PRESS_MS 700
+#endif
+
+// 每个按键"按下时刻"的暂存，用来算按了多久（0 = 当前没有按着）
+static uint32_t buttonDownMs[6] = { 0, 0, 0, 0, 0, 0 };   // 下标 1~5 对应按键 1~5
+
+// 页码 -> 中文名，给按键切页时打印用
+static const char *pageName(uint8_t page) {
+    switch (page) {
+        case PAGE_STATUS:
+            return "状态页";
+        case PAGE_SYSINFO:
+            return "系统信息页";
+        case PAGE_BOOKS:
+            return "书列表页";
+        case PAGE_WAVE:
+            return "测距页";
+        case PAGE_TOUCH:
+            return "触摸测试页";
+        case PAGE_DEBUG:
+            return "电机调试页";
+        default:
+            return "未知页";
+    }
+}
+
 // -----------------------------------------------------------------------------
-static void handleButtonEvent(const ButtonEvent &event) {
-    if (event.pressed == 0) {
-        return;  // 松开事件先不处理
+// 调试页的按键操作（**没有触摸屏时调试页也能用**）
+//
+// 为什么要有这一段：
+//   第 6 页调试页上的按钮都是 LVGL 触摸按钮。一旦触摸没接/没通，
+//   调试页就变成"只能看不能动"的死页面。所以这里给实体按键一套等价操作。
+//
+// 按键分工（只在**当前就在调试页**时生效）：
+//   按键1 短按 = 翻下一页（翻出调试页）
+//   按键1 长按 = 切换点动步长  小10 -> 中100 -> 大500 -> 小10
+//   按键2     = 急停
+//   按键3     = 把当前位置设为零点（人工归零）
+//   按键4(A)  = 升降点动（按当前步长）
+//   按键5(B)  = 推书点动（按当前步长）
+//
+// ⚠️ 所有动作都是"投请求进 MechQueue"，由 stepperTask 执行，
+//    这里绝不直接操作 GPIO，也绝不等电机走完。
+// -----------------------------------------------------------------------------
+static void handleDebugButton(uint8_t index, bool longPress) {
+    uint16_t jogSteps = debugJogSteps();
+    if (jogSteps == 0) {
+        jogSteps = CFG_DEBUG_JOG_MID;
     }
 
+    switch (index) {
+        case 1:
+            if (longPress) {
+                // 切换点动步长：三档循环  小 -> 中 -> 大 -> 小
+                uint16_t next = CFG_DEBUG_JOG_SMALL;
+                if (jogSteps == CFG_DEBUG_JOG_SMALL) {
+                    next = CFG_DEBUG_JOG_MID;
+                } else if (jogSteps == CFG_DEBUG_JOG_MID) {
+                    next = CFG_DEBUG_JOG_LARGE;
+                }
+                setDebugJogSteps(next);   // 只写数据，LVGL 那边自己会刷新
+                Serial.printf("调试页: 点动步长 -> %u 步\n", (unsigned)next);
+                display.showMessage("点动步长已切换（看串口）", 1200);
+            } else {
+                display.nextPage();
+                Serial.printf("调试页: 下一页 -> %s\n", pageName(display.page()));
+            }
+            break;
+
+        case 2:
+            // 急停：安全操作，调试页里随时可用
+            postMechRequest(MECH_REQ_STOP_ALL, 0);
+            Serial.println("调试页按键2: 急停已下发");
+            break;
+
+        case 3:
+            postMechRequest(MECH_REQ_SET_ZERO, 0);
+            Serial.println("调试页按键3: 请求把当前位置设为零点");
+            break;
+
+        case 4:
+            postMechRequest(MECH_REQ_JOG_LIFT, (int32_t)jogSteps);
+            Serial.printf("调试页按键4: 升降点动 %u 步\n", (unsigned)jogSteps);
+            break;
+
+        case 5:
+            postMechRequest(MECH_REQ_JOG_PUSH, (int32_t)jogSteps);
+            Serial.printf("调试页按键5: 推书点动 %u 步\n", (unsigned)jogSteps);
+            break;
+
+        default:
+            break;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// 按键事件 -> 动作
+//
+// 【按键分工（**不依赖触摸屏**）】
+//   按键1 短按 = 下一页            按键1 长按 = 进/出电机调试页(第6页)
+//   按键2 短按 = 重新连接二哈       按键2 在调试页里 = 急停
+//   按键3 短按 = 学习当前目标       按键3 长按 = 进/出电机调试页(备用入口)
+//   按键4(A)  = 存书确认 / 调试页里升降点动
+//   按键5(B)  = 取书请求 / 调试页里推书点动
+//
+// 长按怎么判的：
+//   按下时把 millis() 记进 buttonDownMs[]，松开时算差值，够 CFG_BUTTON_LONG_PRESS_MS 就算长按。
+//   短按的动作在**按下那一刻**就执行（按键手感更跟手），长按的动作在**松开时**执行。
+//   整个过程不阻塞，loop() 照常按 CFG_LOOP_DELAY_MS 转。
+// -----------------------------------------------------------------------------
+static void handleButtonEvent(const ButtonEvent &event) {
+    // 下标保护：ButtonEvent.index 是 1~5
+    if (event.index < 1 || event.index > 5) {
+        return;
+    }
+
+    // ---- 松开事件：算按了多久，够长就执行长按动作 ----
+    if (event.pressed == 0) {
+        uint32_t downMs = buttonDownMs[event.index];
+        buttonDownMs[event.index] = 0;
+        if (downMs == 0) {
+            return;   // 没有对应的按下记录（比如上电前就按着），忽略
+        }
+        uint32_t heldMs = millis() - downMs;
+        if (heldMs < CFG_BUTTON_LONG_PRESS_MS) {
+            return;   // 短按：动作在按下那一刻已经做过了
+        }
+
+        // 只有按键1 / 按键3 有长按动作：进/出调试页
+        if (event.index != 1 && event.index != 3) {
+            return;
+        }
+
+        if (display.page() == PAGE_DEBUG) {
+            display.setPage(PAGE_STATUS);   // 再长按一次 = 退出调试页
+            Serial.printf("按键%u 长按(%lums): 退出调试页 -> %s\n",
+                          (unsigned)event.index, (unsigned long)heldMs,
+                          pageName(display.page()));
+        } else {
+            display.setPage(PAGE_DEBUG);    // 长按 = 进调试页
+            Serial.printf("按键%u 长按(%lums): 进入电机调试页\n",
+                          (unsigned)event.index, (unsigned long)heldMs);
+            Serial.println("  没接触摸屏也能操作: 按键2=急停 按键3=设零点 按键4=升降点动 按键5=推书点动");
+            Serial.println("  按键1长按=切换点动步长; 或者用串口: g / g,up / g,down / g,out / g,back / g,zero / g,save");
+        }
+        return;
+    }
+
+    // ---- 按下事件：先记时刻，再执行短按动作 ----
+    buttonDownMs[event.index] = millis();
+
+    // 当前就在调试页：按键交给调试页（短按动作立刻执行）
+    if (display.page() == PAGE_DEBUG) {
+        handleDebugButton(event.index, false);
+        return;
+    }
+
+    // ---- 其它页面的短按动作 ----
     switch (event.index) {
         case 1:
-            cli.sendCommand("n");
-            Serial.println("按键1: 下一页");
+            display.nextPage();
+            Serial.printf("按键1: 下一页 -> %s\n", pageName(display.page()));
             break;
         case 2:
             cli.sendCommand("r");
@@ -1425,12 +1579,12 @@ static void handleButtonEvent(const ButtonEvent &event) {
             Serial.println("按键3: 学习当前目标");
             break;
         case 4:
-            // A 键：存书流程里是"确认放书"，空闲时是"取当前识别到的学科去存"
+            // A 键：存书流程里是"确认放书"
             if (storeWaitingConfirm) {
                 cli.sendCommand("v,c");
                 Serial.println("按键A: 确认放书");
             } else {
-                Serial.println("按键A: 现在没有在等放书确认（用串口 v,s,<ID> 发起存书）");
+                Serial.println("按键A: 没有在等放书确认（用 v,s,<ID> 存书；长按可进调试页）");
             }
             break;
         case 5:

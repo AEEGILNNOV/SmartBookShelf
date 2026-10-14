@@ -1496,6 +1496,11 @@ void DisplayLib::printDiag() {
                   (unsigned)s_touchRawY, (unsigned)s_touchZ);
     Serial.printf("        压力门限(灵敏度) %d：调大=要按更重，调小=更灵敏，0=不判\n",
                   CFG_TOUCH_PRESSURE_MIN);
+    // 把"当前生效的触摸引脚"打出来：引脚布局可以在 config.h 里一键切换，
+    // 不打印的话根本没法判断屏上这 5 根线到底该接哪儿（接线不对的表现就是"完全没反应"）。
+    Serial.printf("        当前触摸引脚(布局%d): T_CS=%d T_IRQ=%d T_CLK=%d T_DIN=%d T_DO=%d\n",
+                  CFG_TOUCH_PIN_LAYOUT, PIN_TOUCH_CS, PIN_TOUCH_IRQ, PIN_TOUCH_CLK,
+                  PIN_TOUCH_DIN, PIN_TOUCH_DO);
     Serial.printf("        底部屏蔽 %d px（y >= %d 不响应）, 滑动限制 %d\n",
                   CFG_TOUCH_BOTTOM_MASK_PX, SCR_H - CFG_TOUCH_BOTTOM_MASK_PX,
                   CFG_TOUCH_SCROLL_LIMIT);
@@ -2045,6 +2050,10 @@ void DisplayLib::runTouchDump() {
     int irq = s_touch.irqLevel();
     Serial.printf("--- 触摸原始值 4 次采样 (T_IRQ=%s) ---\n",
                   (irq < 0) ? "未接" : (irq == 0 ? "LOW(有触摸)" : "HIGH(空闲)"));
+    Serial.printf("  当前触摸引脚(布局%d): T_CS=%d T_IRQ=%d T_CLK=%d T_DIN=%d T_DO=%d\n",
+                  CFG_TOUCH_PIN_LAYOUT, PIN_TOUCH_CS, PIN_TOUCH_IRQ, PIN_TOUCH_CLK,
+                  PIN_TOUCH_DIN, PIN_TOUCH_DO);
+    Serial.println("  ⚠️ 这 5 根线必须和上面打印的 GPIO 一一对应；接错了就是这个现象：完全没反应");
     Serial.println("  按住屏幕不放，连着敲几次 d,6：T_IRQ 应该变 LOW，Z 应该变大");
     Serial.printf("  判断“算不算按下”的两个条件：坐标 %d~%d，压力 Z >= %d\n",
                   CFG_TOUCH_RAW_MIN, CFG_TOUCH_RAW_MAX, CFG_TOUCH_PRESSURE_MIN);

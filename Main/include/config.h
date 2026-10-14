@@ -305,26 +305,71 @@
 //
 // ⚠️ 上面这段是"引脚为什么不冲突"的推导，**触摸模块实际接没接、接对没接对，
 //    本工程无法从代码确认**，必须用串口命令 d,3 / d,6 实测（见 README 第 10 节）。
+//
+// ⚠️⚠️ 【触摸不动了先看这里】
+//    本次改造把这 5 根脚**整体挪过位置**。如果你的触摸模块还是按旧线序接在
+//    38/39/40/41/42 上，那改完固件以后触摸就会**完全没反应**——代码是好的，是线不对。
+//    两种解决办法二选一：
+//
+//    办法一（推荐，不用动线）：下面 CFG_TOUCH_PIN_LAYOUT 的默认值已经是 2（新脚位），
+//                              把触摸模块的 5 根线按"【接线】"那段重新接到 48/18/13/14/38。
+//
+//    办法二（不想动线）：把下面的 CFG_TOUCH_PIN_LAYOUT 改成 1，一键切回旧脚位 38/39/40/41/42。
+//      ⚠️ 但旧脚位的 40/41/42 和【实体按键】是同一批 GPIO（见第 5 节：按键1/2/3 = 45/46/0，
+//         但 A/B 或者你想加的按键很可能落在 40/41/42）。**触摸和这三个键只能二选一**。
+//         所以办法二只适合"我不要那三个键，我就要触摸"。
+//
+//    无论用哪种办法，都可以用串口 d,6 看芯片到底回没回数据（会打印当前生效的引脚）。
 // -----------------------------------------------------------------------------
 #ifndef CFG_ENABLE_TOUCH
 #define CFG_ENABLE_TOUCH 1        // 1 = 注册 LVGL 输入设备 + 显示触摸测试页
 #endif
 
+// ==== 触摸引脚布局选择（一键切换，不用改下面的 PIN_TOUCH_*）====
+//   1 = 旧工程脚位：T_CS=38  T_IRQ=39  T_CLK=40  T_DIN=41  T_DO=42
+//       ⚠️ 40/41/42 与实体按键/摄像头 D5/D6/D7 冲突，选这个就别想在那三个脚接按键。
+//   2 = 本次改造脚位（默认）：T_CS=48  T_IRQ=18  T_CLK=13  T_DIN=14  T_DO=38
+//       把触摸从"按键要用的 40/41/42"和"旧电机3 的 38/39"上让开，留出脚位给实体按键。
+#ifndef CFG_TOUCH_PIN_LAYOUT
+#define CFG_TOUCH_PIN_LAYOUT 2
+#endif
+
 // 触摸 5 根线（-1 = 这个脚不接）
+// ⚠️ 实际值由上面的 CFG_TOUCH_PIN_LAYOUT 决定，这里只是两套默认值，不用手改。
 #ifndef PIN_TOUCH_CS
-#define PIN_TOUCH_CS 48           // T_CS  片选
+#if CFG_TOUCH_PIN_LAYOUT == 1
+#define PIN_TOUCH_CS 38           // T_CS  片选（旧脚位）
+#else
+#define PIN_TOUCH_CS 48           // T_CS  片选（新脚位，默认）
+#endif
 #endif
 #ifndef PIN_TOUCH_IRQ
-#define PIN_TOUCH_IRQ 18          // T_IRQ 中断（可选，轮询方式用不到）
+#if CFG_TOUCH_PIN_LAYOUT == 1
+#define PIN_TOUCH_IRQ 39          // T_IRQ 中断（本工程用轮询，可不接）
+#else
+#define PIN_TOUCH_IRQ 18          // T_IRQ 中断（本工程用轮询，可不接）
+#endif
 #endif
 #ifndef PIN_TOUCH_CLK
-#define PIN_TOUCH_CLK 13          // T_CLK 时钟
+#if CFG_TOUCH_PIN_LAYOUT == 1
+#define PIN_TOUCH_CLK 40          // T_CLK 时钟（旧脚位）
+#else
+#define PIN_TOUCH_CLK 13          // T_CLK 时钟（新脚位，默认）
+#endif
 #endif
 #ifndef PIN_TOUCH_DIN
-#define PIN_TOUCH_DIN 14          // T_DIN 主机输出
+#if CFG_TOUCH_PIN_LAYOUT == 1
+#define PIN_TOUCH_DIN 41          // T_DIN 主机输出（旧脚位）
+#else
+#define PIN_TOUCH_DIN 14          // T_DIN 主机输出（新脚位，默认）
+#endif
 #endif
 #ifndef PIN_TOUCH_DO
-#define PIN_TOUCH_DO 38           // T_DO  触摸数据回来（相当于 MISO）
+#if CFG_TOUCH_PIN_LAYOUT == 1
+#define PIN_TOUCH_DO 42           // T_DO  触摸数据回来（旧脚位）
+#else
+#define PIN_TOUCH_DO 38           // T_DO  触摸数据回来（新脚位，默认）
+#endif
 #endif
 
 // 原始值有效窗口：落在窗口外当成“没按”。按面板边缘没反应就把窗口放宽。
@@ -499,7 +544,7 @@
 
 // 页脚操作提示。改按键定义时同步改这一行（LVGL 只认 ASCII 才会用 montserrat_12）
 #ifndef CFG_FOOTER_HINT
-#define CFG_FOOTER_HINT "k1 next k2 recon k3 learn A=store B=take g=debug"
+#define CFG_FOOTER_HINT "k1:next/hold=DEBUG k2:recon k3:learn/hold=DEBUG"
 #endif
 
 // 最多显示（或参与签名比较）几条识别块
