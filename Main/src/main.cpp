@@ -700,7 +700,7 @@ static void cmdDebug(const char *arg) {
 //
 // 【流程状态】
 //   空闲 --收到 MECH_REQ_STORE_BOOK--> 存书检查(ID/重复/位置) --通过--> 升降到待存位
-//        --升降完成--> 等用户按确认(A键 / 串口 v,c / 调试页) --确认--> 记录插到顶部 + 落盘
+//        --不动机械--> 等用户从顶部放书并按确认(A键 / v,c) --确认--> 记录插到顶部 + 落盘
 //        --超时(CFG_BOOK_PLACE_TIMEOUT_MS)--> 取消, 书单不动
 //
 //   空闲 --收到 MECH_REQ_TAKE_BOOK--> 取书检查(存在/位置有效) --> 升降对准出书口
@@ -714,7 +714,10 @@ static void cmdDebug(const char *arg) {
 // 流程状态（用一个 uint8_t 加一组宏，作者看起来最直接）
 #define FLOW_IDLE              0
 #define FLOW_STORE_CHECK       1   // 存书前检查（ID 合法 / 没重复 / 位置有效）
-#define FLOW_STORE_LIFT_HOME   2   // 升降走到"待存书位置"
+// ⚠️ 已废弃（保留编号不删，防止以后加状态时编号对不上）：
+//    原来存书要先把升降移到"待存书位置"，现在**取消了这一步** ——
+//    摄像头在整叠书正上方、书从顶部开口放进去，存书时升降不该动。
+#define FLOW_STORE_LIFT_HOME   2   // （废弃，不再使用）
 #define FLOW_STORE_WAIT_BOOK   3   // 等用户把书放好并确认
 #define FLOW_TAKE_LIFT         4   // 升降把目标书对准出书口
 #define FLOW_TAKE_PUSH         5   // 推书推出
@@ -752,6 +755,7 @@ static uint8_t flowRetry = 0;             // 通用重试/阶段计数
 // =============================================================================
 
 static uint32_t flowDeadlineMs = 0;       // 流程级超时
+static uint32_t flowWaitStartMs = 0;      // 开始"等放书确认"的时刻（给界面算倒计时）
 
 // 把"目标书的升降位置"算出来
 //
@@ -798,6 +802,7 @@ static BookResult checkStoreRequest(int16_t id, char *note, size_t noteSize) {
 // 存书流程推进（每轮调一次，不阻塞）
 static void flowStepStore() {
     switch (flowState) {
+        // ---- 存书第一步：检查 ID / 查重 / 位置是否有效 ----
         case FLOW_STORE_CHECK: {
             char note[CFG_BOOK_NOTE_LEN];
             BookResult r = checkStoreRequest(flowStoreId, note, sizeof(note));
@@ -810,52 +815,34 @@ static void flowStepStore() {
                 return;
             }
 
-            // 位置有效才能走到这里：把机构移到"待存书位置"（也是零点位置）
-            Serial.println("存书: 检查通过, 升降移到待存书位置...");
-
-            // ⚠️ 动作会改变机械位置，所以**先**在 Flash 里记"动作未完成"
-            storage.markActionPending();
-
-            int32_t target = calcLiftTargetForIndex(0);
-            if (!mechanism.moveLiftTo(target)) {
-                Serial.printf("存书: ❌ 升降动作下发失败 —— %s\n",
-                              mechanism.lastErrorText());
-                storage.clearActionPending();
-                notify("升降无法启动，请检查机构后重试", CFG_MESSAGE_HOLD_MS);
-                flowState = FLOW_IDLE;
-                return;
-            }
-            flowState = FLOW_STORE_LIFT_HOME;
-            break;
-        }
-
-        case FLOW_STORE_LIFT_HOME: {
-            MechResult res;
-            if (!mechanism.takeResult(res)) {
-                break;   // 还在走，下一轮再看（**不阻塞等待**）
-            }
-            if (!res.ok) {
-                Serial.printf("存书: ❌ 升降没有正常完成 —— %s\n",
-                              mechanism.lastErrorText());
-                notify("升降异常，位置需重新归零，书单未改动", CFG_MESSAGE_HOLD_MS);
-                flowState = FLOW_IDLE;
-                return;
-            }
-
-            storage.clearActionPending();       // 动作正常结束，清掉未完成标记
-            saveAllToFlash("升降到位(存书)");   // 步数变了，落盘
-
-            Serial.printf("存书: 已到待存书位置, 请把《%s》放到书堆顶部\n",
+            // =================================================================
+            // ⚠️ 这里**不移动升降机构**（这是本次修正的一个理解偏差）
+            //
+            //   实际情况：摄像头固定在**整叠书的正上方**，书是从顶部开口直接放进去的，
+            //   放进去那一本就是书堆最顶上的一本。所以：
+            //     · 存书时升降**不需要动**，机构保持不动就行；
+            //     · 新书记录插到数组下标 0（= 最顶部），和物理位置天然对应；
+            //     · 后面再取这本书，下标 0 的公式算出来就是"不动"，也是自洽的。
+            //
+            //   （升降机构只在**取书**时才需要动：把目标书移到出书口高度。
+            //     如果存书时反而把书堆挪走，书放进去的位置就和数组记录对不上了。）
+            // =================================================================
+            Serial.printf("存书: 检查通过 —— 请把《%s》从顶部放进书堆\n",
                           getBookNameById(flowStoreId));
             Serial.println("      放好后: 串口敲 v,c 确认 / 按 A 键 / 用调试页确认按钮");
             Serial.printf("      %lu 秒内没有确认就自动取消(不会入库)\n",
                           (unsigned long)(CFG_BOOK_PLACE_TIMEOUT_MS / 1000UL));
-            notify("请把书放到顶部，然后确认入库", CFG_MESSAGE_HOLD_MS);
+            Serial.println("      注意: 存书不动升降机构, 书直接从顶部开口放进去");
+            notify("请把书从顶部放入，然后确认入库", CFG_MESSAGE_HOLD_MS);
 
             // ⚠️ 机械上**没有**"书已放入"的检测手段（没有对射/微动开关），
-            //    所以这里不能虚构自动检测，只能明确地等用户确认。
+            //    所以不能虚构自动检测，只能明确地等用户确认。
+            //    但"等确认"本身也算一次未完成的存书动作，所以照样在 Flash 里记标记，
+            //    这样万一在等待期间断电，复位后能看出"上次存书没走完"。
+            storage.markActionPending();
             storeWaitingConfirm = true;
-            flowDeadlineMs = millis() + CFG_BOOK_PLACE_TIMEOUT_MS;
+            flowWaitStartMs = millis();
+            flowDeadlineMs = flowWaitStartMs + CFG_BOOK_PLACE_TIMEOUT_MS;
             flowState = FLOW_STORE_WAIT_BOOK;
             break;
         }
@@ -877,6 +864,7 @@ static void flowStepStore() {
                                   getBookNameById(flowStoreId), (int)newIndex,
                                   (int)display.bookCount());
                     notify("入库成功", CFG_MESSAGE_HOLD_MS);
+                    storage.clearActionPending();   // 存书动作正常收尾，清掉未完成标记
                     saveAllToFlash("新书入库");
                 }
                 flowStoreId = -1;
@@ -887,6 +875,7 @@ static void flowStepStore() {
             // 超时取消：机械位置不动（机构已经在待存位置），书单也没改
             if ((int32_t)(millis() - flowDeadlineMs) >= 0) {
                 storeWaitingConfirm = false;
+                storage.clearActionPending();   // 取消也算正常收尾
                 Serial.println("存书: 等确认超时，已取消入库（书单和机械位置都没变）");
                 Serial.println("      如果书其实已经放进去了，请再用 v,s,<分类ID> 重新走一遍流程。");
                 notify("存书超时，已取消", CFG_MESSAGE_HOLD_MS);
@@ -1221,8 +1210,7 @@ static void stepperTask(void *pvParameters) {
         }
 
         // ---- ⑤ 推进流程状态机 ----
-        if (flowState == FLOW_STORE_CHECK || flowState == FLOW_STORE_LIFT_HOME ||
-            flowState == FLOW_STORE_WAIT_BOOK) {
+        if (flowState == FLOW_STORE_CHECK || flowState == FLOW_STORE_WAIT_BOOK) {
             flowStepStore();
         } else if (flowState == FLOW_TAKE_LIFT || flowState == FLOW_TAKE_PUSH ||
                    flowState == FLOW_TAKE_RETRACT) {

@@ -618,15 +618,15 @@
 #define HUSKY_TIMEOUT_MS 800
 #endif
 
-// ---- ⚠️ 识别节拍：本次需求要求"正常识别周期 5 秒"，所以这里改成 5000 ----
-// 原来 300ms 一帧。改慢有两个原因：
-//   ① 需求就是 5 秒；
-//   ② 每一帧都去判重/写书单/刷界面既没必要，也容易把"同一本书"当成新书反复处理。
+// ---- ⚠️ 识别节拍：正常识别周期 = 1 秒（原来是 5 秒，实机上太慢了）----
+// 原来 300ms 一帧；上一版改成 5 秒，实机用下来"要盯着看好几秒才反应"，太慢，
+//   现在改成 1 秒。之所以不是更快，是因为：
+//     每帧都要判重/更新界面，太快没有意义，还会把 CPU 和 I2C 时间片占掉。
 // 注意区分两个东西：
-//   HUSKY_READ_INTERVAL_MS      = 正常识别周期（5 秒）
-//   HUSKY_RECONNECT_INTERVAL_MS = 掉线后多久重试一次（2 秒，这个要快）
+//   HUSKY_READ_INTERVAL_MS      = 正常识别周期（1 秒）
+//   HUSKY_RECONNECT_INTERVAL_MS = 掉线后多久重试一次（2 秒，这个要快，**没动它**）
 #ifndef HUSKY_READ_INTERVAL_MS
-#define HUSKY_READ_INTERVAL_MS 5000
+#define HUSKY_READ_INTERVAL_MS 1000
 #endif
 
 // 二哈掉线后的重连间隔(ms)。掉线时不能等 5 秒才试一次，否则用户觉得"卡住了"。
