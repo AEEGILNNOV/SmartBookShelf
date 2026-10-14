@@ -625,15 +625,26 @@ static void cmdStopMotor(const char *arg) {
 }
 
 // 串口命令 g：电机调试页 + 机械快捷操作
+//
 //   g            跳到第 6 页（电机调试页）
 //   g,zero       把当前位置设为软件零点（人工归零）
 //   g,save       保存当前位置到 Flash
 //   g,up / g,down / g,out / g,back   按当前步长点动
 //   g,stop       急停
+//
+// ⚠️⚠️ 【这里踩过一个真 bug，别再踩回去】
+//   原来是用 `char sub = arg[0]` 只取**第一个字母**来分派：
+//     "zero" 的首字母是 z -> 命中了 `sub == 'z'` 分支 -> 被当成"急停"处理了！
+//   结果就是 `g,zero` 只停机、**永远不会去设零点**，现象是"归零后没有效果"，
+//   位置一直是"无效"，于是存书请求一直被拒绝，书永远进不了动态数组。
+//   教训：子命令必须**按整串**比较，不能只看首字母（"save" 和 "stop" 也撞首字母）。
+// -----------------------------------------------------------------------------
 static void cmdDebug(const char *arg) {
-    char sub = (arg != nullptr && arg[0] != 0) ? arg[0] : 0;
+    // SerialCmdLib 已经把第一个逗号切掉了：g,zero -> arg = "zero"
+    const char *sub = (arg != nullptr) ? arg : "";
 
-    if (sub == 0) {
+    // ---- 不带参数：进调试页 ----
+    if (sub[0] == 0) {
         display.setPage(PAGE_DEBUG);
         Serial.printf("屏幕切到电机调试页(第 %u 页)\n",
                       (unsigned)display.page() + 1);
@@ -647,20 +658,34 @@ static void cmdDebug(const char *arg) {
         jog = CFG_DEBUG_JOG_MID;
     }
 
-    if (sub == 'z' || sub == 'Z') {
-        cmdStopMotor(nullptr);
-    } else if (sub == 's' || sub == 'S') {
+    // ---- 按**整串**比较，绝不能只看首字母（见上面那段 bug 说明）----
+    if (strcmp(sub, "zero") == 0) {
+        // 人工归零：只把当前软件步数记成 0，电机不会动，也不会去找机械原点
+        postMechRequest(MECH_REQ_SET_ZERO, 0);
+        Serial.println("调试: 已请求把当前位置设为零点（看下面 stepperTask 的执行结果）");
+    } else if (strcmp(sub, "save") == 0) {
         postMechRequest(MECH_REQ_SAVE_NOW, 0);
-    } else if (sub == 'u' || sub == 'U') {
+    } else if (strcmp(sub, "up") == 0) {
         postMechRequest(MECH_REQ_JOG_LIFT, (int32_t)jog);
-    } else if (sub == 'd' || sub == 'D') {
+        Serial.printf("调试: 升降上移点动 %u 步\n", (unsigned)jog);
+    } else if (strcmp(sub, "down") == 0) {
         postMechRequest(MECH_REQ_JOG_LIFT, -(int32_t)jog);
-    } else if (sub == 'o' || sub == 'O') {
+        Serial.printf("调试: 升降下移点动 %u 步\n", (unsigned)jog);
+    } else if (strcmp(sub, "out") == 0) {
         postMechRequest(MECH_REQ_JOG_PUSH, (int32_t)jog);
-    } else if (sub == 'b' || sub == 'B') {
+        Serial.printf("调试: 推书前进点动 %u 步\n", (unsigned)jog);
+    } else if (strcmp(sub, "back") == 0) {
         postMechRequest(MECH_REQ_JOG_PUSH, -(int32_t)jog);
+        Serial.printf("调试: 推书后退点动 %u 步（机械允许才用）\n", (unsigned)jog);
+    } else if (strcmp(sub, "stop") == 0) {
+        cmdStopMotor(nullptr);
+    } else if (strcmp(sub, "clear") == 0) {
+        // 清空书籍数据：**不动机械位置**（两个操作永远独立）
+        postMechRequest(MECH_REQ_CLEAR_BOOKS, 0);
     } else {
-        Serial.println("调试命令: g 进调试页 | g,zero 设零点 | g,save 保存 | g,up/down/out/back 点动 | g,stop 急停");
+        Serial.printf("调试: 看不懂 \"g,%s\"\n", sub);
+        Serial.println("  用法: g 进调试页 | g,zero 设零点 | g,save 保存 | g,clear 清空书籍");
+        Serial.println("        g,up / g,down 升降点动 | g,out / g,back 推书点动 | g,stop 急停");
     }
 }
 
