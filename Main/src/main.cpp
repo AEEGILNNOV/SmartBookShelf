@@ -1402,6 +1402,14 @@ static void cmdFlash(const char *arg) {
             Serial.printf("存储: 已加载 %d 本书, 步数=%ld, 位置有效=%s, 需要归零=%s\n",
                           (int)display.bookCount(), (long)steps,
                           posValid ? "是" : "否", needHoming ? "是" : "否");
+
+            // ⚠️⚠️ 【这里必须同步给机械层，否则"加载成功但书还是进不去"】
+            //   以前 q,l 只把书单和几个回填值交给 main.cpp，机械层里的 needHoming 还是 true，
+            //   于是 checkStoreRequest() 一直以"位置无效"拒绝存书请求 —— 用户看到的就是
+            //   "书单能加载、但新书永远加不进去"。
+            mechanism.applyLoadedPosition(steps, posValid, needHoming);
+            lastSavedLiftSteps = mechanism.liftSteps();   // 同步记账，避免兜底立刻又写一次
+            lastAutoSaveMs = millis();
             printBookList();
         } else {
             Serial.println("存储: ❌ 加载失败(没数据/损坏/版本不匹配)，内存里的书单没有被动过");
@@ -2544,9 +2552,12 @@ void setup() {
                                             savedPosValid, savedNeedHoming);
             if (flashLoaded) {
                 Serial.printf("存储: 已恢复 %d 本书\n", (int)display.bookCount());
+                storage.printKeys();   // books 长度应该 = 2 + 条数 x 每条字节数
                 printBookList();
             } else {
                 Serial.println("存储: 没有可用的历史数据(或数据需要人工处理)，从空书单开始");
+                // 直接打键清单：一眼看出到底是 books 没写进去，还是写进去了但读不出来
+                storage.printKeys();
             }
         }
     } else {
@@ -2562,7 +2573,13 @@ void setup() {
     //    Stepper28BYJ 没有"直接写位置"的接口，用 run() 补步数会真的驱动电机，
     //    开机盲动是明确禁止的。所以掉电后必须人工归零一次（见 README 第 7 节）。
     if (flashLoaded) {
-        mechanism.restorePosition(savedLiftSteps);
+        // 开机加载：用 applyLoadedPosition，如果 Flash 里记的是"位置有效且不需要归零"，
+        // 就把它恢复成有效 —— 这样"上次正常关机"的情况下开机不用再归零一次。
+        // ⚠️ 位数的语义：步数基准会被清 0（开环系统只能把"当前"当基准），
+        //    所以这里恢复的"有效"指的是"零点基准可用"，不是"机构回到了 300 步那个位置"。
+        mechanism.applyLoadedPosition(savedLiftSteps, savedPosValid, savedNeedHoming);
+        lastSavedLiftSteps = mechanism.liftSteps();
+        lastAutoSaveMs = millis();
     }
 
     // ---- 5) 队列 ----

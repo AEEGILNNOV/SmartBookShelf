@@ -666,6 +666,49 @@ bool MechanismLib::jogAllowed(uint8_t axis, int32_t steps, bool allowInvert, boo
 //    也就是说：**掉电后保存的步数会被读出来显示和打印，但不会直接变成新的位置基准**，
 //    想要精确恢复必须人工归零一次。这一点已在 README 和调试页里写明。
 // -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// 运行中从 Flash 重新加载位置（串口 q,l 用）
+//
+// 【为什么要单独一个函数】
+//   串口 q,l 是"用户明确要求从 Flash 重新加载"。它以前只把书单和几个回填值
+//   交给 main.cpp，**没有把位置状态同步给机械层** —— 于是机械层里 needHoming 还是 true，
+//   存书请求继续被拒，用户看到的就是"加载成功了但书还是进不去"。
+//
+//   ⚠️ 仍然要说清楚：步数基准会被清 0。
+//      因为 Stepper28BYJ 没有"写入任意步数"的接口，而开机/加载后机构就在当前位置，
+//      软件只能把"当前"当基准。所以 Flash 里那个 300 步只是历史值，不会变成实机位置。
+//      positionValid 恢复成有效，表示的是"零点基准已建立、可以走相对定位"，
+//      不代表"机构真的回到了当初那 300 步的位置"。
+// -----------------------------------------------------------------------------
+void MechanismLib::applyLoadedPosition(int32_t liftSteps, bool positionValid,
+                                       bool needHoming) {
+    if (_lift != nullptr && _lift->isWired()) {
+        _lift->resetPosition();   // 只改软件计数，不发脉冲、不碰 GPIO
+    }
+    if (_push != nullptr && _push->isWired()) {
+        _push->resetPosition();
+    }
+
+    _positionValid = positionValid;
+    _needHoming = needHoming;
+    _state = MECH_IDLE;
+    _activeAxis = MECH_AXIS_NONE;
+    _lastError = needHoming ? MECH_ERR_POS_INVALID : MECH_ERR_NONE;
+    if (needHoming) {
+        snprintf(_lastErrorText, sizeof(_lastErrorText),
+                 "从 Flash 加载：位置需要人工归零");
+    } else {
+        _lastErrorText[0] = 0;
+    }
+
+    Serial.printf("机械: 从 Flash 加载位置 —— 位置有效=%s, 需要归零=%s",
+                  positionValid ? "是" : "否", needHoming ? "是" : "否");
+    if (liftSteps != 0) {
+        Serial.printf(" (Flash 里记的是 %ld 步, 已按\"当前位置为基准\"清 0)", (long)liftSteps);
+    }
+    Serial.println();
+}
+
 void MechanismLib::restorePosition(int32_t liftSteps) {
     if (_lift != nullptr && _lift->isWired()) {
         _lift->resetPosition();   // 只改软件计数，不发脉冲、不碰 GPIO

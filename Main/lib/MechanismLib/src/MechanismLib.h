@@ -147,7 +147,18 @@ public:
     //      用 run() 补步数会真的驱动电机，绝不允许开机盲动）。
     //   实际效果：位置一律判为无效 + 需要人工归零，另加一条串口日志说明。
     //   保守是刻意的：宁可多要一次人工归零，也不要拿一个不知道对不对的位置去自动取书。
+    // ⚠️ 已由 applyLoadedPosition() 取代（保留接口防止外部老调用编译不过）：
     void restorePosition(int32_t liftSteps);
+
+    // 运行中从 Flash 重新加载位置时用（串口 q,l）。
+    //   ⚠️ 和 restorePosition() 的区别：
+    //     restorePosition() 是**开机**用的，一律判"位置无效+需归零"（那时候确实不知道位置）；
+    //     applyLoadedPosition() 是**运行中**用户明确执行"从 Flash 加载"时用的，
+    //       如果 Flash 里记的是"位置有效且不需要归零"，就把它恢复成有效 ——
+    //       否则会出现"q,l 明明加载成功、位置还是无效、存书一直被拒"的怪现象。
+    //   两个都会把当前位置计数清 0（因为机构上电/加载后就在现在这个位置，
+    //   软件只能把"当前"当基准），这一点是开环系统的固有限制。
+    void applyLoadedPosition(int32_t liftSteps, bool positionValid, bool needHoming);
 
     // 软限位：单次点动是否会被拦（调试页显示"能不能再走"）
     bool jogAllowed(uint8_t axis, int32_t steps, bool allowInvert, bool rawMode = false) const;
