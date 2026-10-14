@@ -378,18 +378,25 @@ static void printBookList() {
     display.printBooks();
 }
 
-// 当前应该写进 Flash 的升降步数（= 历史基准 + 本次累计位移）
-static int32_t persistedLiftSteps() {
-    return g_persistBase + g_pendingPosOffset;
+// 把"机构自己变了多少"折算进 pendingPosOffset。
+//
+// ⚠️⚠️ 【这是本模块最关键的一步，必须从机构位置自己推导】
+//   一开始我是在"调试页 jog / 按键 jog"那两条分支里手动累加的 —— 结果漏掉了
+//   串口 m,1,125 那条路（它走 runMotor() -> mechanism.jog()，不经过那两条分支），
+//   于是用户看到"机构明明走到 250，保存却是 0"。
+//   现在改成：不管是谁让机构动的，只要 mechanism.liftSteps() 变了，这里就算得出来。
+//   这样"位置变了就一定落盘"才是真的，而不是看运气走哪条命令。
+static void syncPosOffsetFromMechanism() {
+    int32_t now = mechanism.liftSteps();
+    g_pendingPosOffset += (now - g_mechPosAtLastSave);
+    g_mechPosAtLastSave = now;
 }
 
-// 机构位置变了多少：返回"本次相对于上次记账点的位移"，并把记账点推到现在。
-// 只要机构真的动过，调用它就能拿到带符号的位移量。
-static int32_t takeMechanismDelta() {
-    int32_t now = mechanism.liftSteps();
-    int32_t delta = now - g_mechPosAtLastSave;
-    g_mechPosAtLastSave = now;
-    return delta;
+// 当前应该写进 Flash 的升降步数（= 历史基准 + 加载后的累计位移）。
+// 每次调用都先把"机构实际位置"折算进去，所以任何调用路径看到的都是最新值。
+static int32_t persistedLiftSteps() {
+    syncPosOffsetFromMechanism();
+    return g_persistBase + g_pendingPosOffset;
 }
 
 // 保存成功后统一记账：base 变成刚写进去的值，offset 归零。
@@ -417,9 +424,12 @@ static bool saveAllToFlash(const char *why) {
     bool ok = storage.saveAll(g_books, steps, positionValid, needHoming);
     if (ok) {
         commitPersistAccounting(steps);
-        Serial.printf("存储: 已保存 (%s) 书单=%d 本, 升降步数=%ld, 位置有效=%s, 需要归零=%s\n",
+        Serial.printf("存储: 已保存 (%s) 书单=%d 本, 升降步数=%ld, 位置有效=%s, 需要归零=%s",
                       why, (int)display.bookCount(), (long)steps,
                       positionValid ? "是" : "否", needHoming ? "是" : "否");
+        Serial.printf("        (记账: base=%ld offset=%ld 机构=%ld)\n",
+                      (long)g_persistBase, (long)g_pendingPosOffset,
+                      (long)mechanism.liftSteps());
     } else {
         Serial.printf("存储: ❌ 保存失败 (%s), 看上面 StorageLib 的日志\n", why);
     }
@@ -1228,18 +1238,13 @@ static void stepperTask(void *pvParameters) {
                     if (flowState != FLOW_IDLE) {
                         Serial.println("机械: 拒绝点动 —— 存书/取书流程正在进行");
                         snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", "流程进行中，暂不接受点动");
-                    } else {
-                        int32_t posBefore = mechanism.liftSteps();
-                        bool started = mechanism.jog(MECH_AXIS_LIFT, req.arg, true,
-                                                     req.raw != 0);
-                        // ⚠️ jog() 里会调用 run()，而 _posSteps 是从"当前位置"继续累加的，
-                        //    所以这里用 (当前位置 - 起跳前位置) 就能拿到本次真实位移。
-                        g_pendingPosOffset += (mechanism.liftSteps() - posBefore);
-                        if (!started) {
-                            Serial.printf("机械: 升降点动被拒绝 —— %s\n",
-                                          mechanism.lastErrorText());
-                            snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", mechanism.lastErrorText());
-                        }
+                    } else if (!mechanism.jog(MECH_AXIS_LIFT, req.arg, true,
+                                              req.raw != 0)) {
+                        // 位移记账不在这里做：统一由 syncPosOffsetFromMechanism() 从机构位置推导，
+                        // 这样串口 m,1,N / 调试页 / 按键 / 存书下移 走的都是同一套逻辑。
+                        Serial.printf("机械: 升降点动被拒绝 —— %s\n",
+                                      mechanism.lastErrorText());
+                        snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", mechanism.lastErrorText());
                     }
                     break;
 
@@ -1247,16 +1252,11 @@ static void stepperTask(void *pvParameters) {
                     if (flowState != FLOW_IDLE) {
                         Serial.println("机械: 拒绝点动 —— 存书/取书流程正在进行");
                         snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", "流程进行中，暂不接受点动");
-                    } else {
-                        int32_t posBefore = mechanism.liftSteps();
-                        bool started = mechanism.jog(MECH_AXIS_PUSH, req.arg, true,
-                                                     req.raw != 0);
-                        g_pendingPosOffset += (mechanism.liftSteps() - posBefore);
-                        if (!started) {
-                            Serial.printf("机械: 推书点动被拒绝 —— %s\n",
-                                          mechanism.lastErrorText());
-                            snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", mechanism.lastErrorText());
-                        }
+                    } else if (!mechanism.jog(MECH_AXIS_PUSH, req.arg, true,
+                                              req.raw != 0)) {
+                        Serial.printf("机械: 推书点动被拒绝 —— %s\n",
+                                      mechanism.lastErrorText());
+                        snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", mechanism.lastErrorText());
                     }
                     break;
 
@@ -1270,7 +1270,7 @@ static void stepperTask(void *pvParameters) {
                 case MECH_REQ_SET_ZERO:
                     if (mechanism.setZeroHere()) {
                         // 归零后立刻落盘：这是"位置基准"的来源，必须马上记住
-                        // 归零 = 零点重建：历史基准和累计位移都清 0
+                        // 归零 = 零点重建：基准和累计位移都清 0，记账点对齐到机构当前(0)
                         g_persistBase = 0;
                         g_pendingPosOffset = 0;
                         g_mechPosAtLastSave = mechanism.liftSteps();
@@ -1330,8 +1330,10 @@ static void stepperTask(void *pvParameters) {
 
         // ---- ③.5 位置自动落盘：机械刚停下来就保存 ----
         // 只看 busy() 的下降沿（在动 -> 停），不消费任何结果，所以不会影响流程。
+        // ⚠️ 每轮都先 syncPosOffsetFromMechanism()：这样不管机构是被哪条命令驱动的都会记账。
 #if CFG_AUTO_SAVE_ON_MOVE
         {
+            syncPosOffsetFromMechanism();   // 无条件把机构真实位移折算进记账
             bool busyNow = mechanism.busy();
             uint32_t nowMs = millis();
             bool needSave = false;

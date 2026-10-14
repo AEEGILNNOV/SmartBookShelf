@@ -587,58 +587,91 @@ def main():
     #             如果自动保存直接存 mechanism.liftSteps()，
     #             Flash 里的 300 会被立刻覆盖成 0（用户看到"300 怎么变了"）。
     class Persist:
+        # 对应 main.cpp 的位置持久化模型(base + 从机构位置推导的 offset)
+
         def __init__(self):
-            self.base = 0          # g_persistBase
-            self.offset = 0        # g_pendingPosOffset
-            self.last_saved = 0    # lastSavedLiftSteps
+            self.base = 0              # g_persistBase
+            self.offset = 0            # g_pendingPosOffset
+            self.mech_at_last = 0      # g_mechPosAtLastSave
+            self.last_saved = 0        # lastSavedLiftSteps
+            self.mech = 0              # mechanism.liftSteps()
+
+        def sync(self):
+            # 对应 syncPosOffsetFromMechanism()
+            # 不管是谁驱动了机构，位移都从这里推导 —— 这正是之前漏掉 m,1,N 的原因
+            self.offset += (self.mech - self.mech_at_last)
+            self.mech_at_last = self.mech
 
         def value(self):
+            self.sync()
             return self.base + self.offset
 
         def load_from_flash(self, steps):
-            # 对应 q,l / 开机加载后的记账
             self.base = steps
             self.offset = 0
+            self.mech_at_last = self.mech
             self.last_saved = steps
 
-        def on_delta(self, d):
-            self.offset += d
+        def move(self, d):
+            # 机构走 d 步（Stepper28BYJ 把 _posSteps 加上 d）
+            self.mech += d
 
         def auto_save_if_changed(self):
-            # 对应"位置 != 上次保存值 就补写"的兜底路径
-            if self.value() != self.last_saved:
-                saved = self.value()
-                self.base = saved      # commitPersistAccounting()
+            v = self.value()
+            if v != self.last_saved:
+                self.base = v          # commitPersistAccounting()
                 self.offset = 0
-                self.last_saved = saved
-                return saved
+                self.mech_at_last = self.mech
+                self.last_saved = v
+                return v
             return None
 
         def zero_here(self):
-            # 人工归零 = 零点重建：base 和 offset 都清 0
             self.base = 0
             self.offset = 0
+            self.mech = 0
+            self.mech_at_last = 0
             self.last_saved = 0
-        
     p = Persist()
     p.load_from_flash(300)
     check("加载 300 后，待写值 = 300（不是 0）", p.value() == 300, str(p.value()))
     check("加载后什么都不做 -> 不需要保存（历史值不会被抹掉）",
           p.auto_save_if_changed() is None)
-    p.on_delta(100)
+    p.move(100)
     check("机构走 +100 -> 待写值 = 400", p.value() == 400, str(p.value()))
     check("变化后确实触发一次保存，且写入 400", p.auto_save_if_changed() == 400)
     check("保存后 base=400 offset=0（记账已滚动）",
           p.base == 400 and p.offset == 0)
     check("再保存一次不会重复写", p.auto_save_if_changed() is None)
-    p.on_delta(-125)
+    p.move(-125)
     check("机构反向走 125 -> 待写值 = 275", p.value() == 275, str(p.value()))
     p.auto_save_if_changed()
     check("反向位移也正确落盘", p.base == 275 and p.offset == 0)
     p.zero_here()
     check("人工归零后 base=offset=0", p.value() == 0)
-    p.on_delta(100)
+    p.move(100)
     check("归零后再走 100 -> 待写值 = 100（不背历史包袱）", p.value() == 100, str(p.value()))
+
+
+    # ---- 复现用户实测: 加载后走 m,1,125 ----
+    #
+    # 之前记账只写在"调试页 jog / 按键 jog"两条分支里，
+    # 而串口 m,1,N 走的是 runMotor() -> mechanism.jog()，完全没经过它们，
+    # 所以 offset 一直是 0，用户看到的日志就是"机构现在位置=250，保存却是 0 步"。
+    # 现在改成从机构位置推导，任何路径都算得对。
+    p2 = Persist()
+    p2.load_from_flash(300)                 # 用户日志: q,l 加载 300 步
+    check("场景: 加载 300 后 base=300", p2.base == 300, str(p2.base))
+    check("场景: 加载后不动 -> 不写(历史值不被抹)", p2.auto_save_if_changed() is None)
+    p2.move(125)                            # 用户日志: 机构从 125 走到 250
+    check("场景: 机构走 125 步 -> 待写值 = 425(不是 0)", p2.value() == 425, str(p2.value()))
+    check("场景: 走完触发自动保存, 写入 425", p2.auto_save_if_changed() == 425)
+    check("场景: 保存后 base=425 offset=0", p2.base == 425 and p2.offset == 0,
+          "base=%d offset=%d" % (p2.base, p2.offset))
+    p2.move(125)
+    check("场景: 再走 125 -> 待写值 = 550", p2.value() == 550, str(p2.value()))
+    p2.zero_here()
+    check("场景: 归零后待写值 = 0", p2.value() == 0)
 
     # ---------------- 汇总 ----------------
     print("")
