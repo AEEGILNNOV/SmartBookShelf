@@ -134,6 +134,18 @@ static int16_t lastRawId = -1;          // 上一帧的分类 ID（-1 = 没有�
 static uint8_t stableCount = 0;         // 同一个 ID 连续出现了几次
 static int16_t lastHandledId = -1;      // 已经"处理过（请求过入库）"的 ID
 
+// ---- 识别链路的诊断信息（串口命令 j 打印，排查"识别到了但进不了数组"）----
+//
+// 为什么要有这几个：从"二哈看到书"到"动态数组里真的多一条"中间有好几道关卡
+// （算法不对 / ID 无效 / 防抖没攒够 / 判定已存在 / 位置无效 / 流程忙 / 队列满），
+// 任何一道没过，现象都是"数组里还是空的"，光看现象分不出是哪一步。
+static int16_t recogLastId = -1;            // 最近一帧的分类 ID（-1 = 画面里没目标）
+static int16_t recogLastWords = 0;          // 最近一帧识别到几个块
+static uint8_t recogStable = 0;             // 这个 ID 连续稳定了几帧
+static const char *recogModeText = "?";     // 最近一次读帧时的算法名
+static int16_t recogModeIdx = -1;           // 最近一次读帧时的算法下标
+static char recogNote[CFG_BOOK_NOTE_LEN] = "";  // 最后一次判定结果（中文）
+
 // 上一次识别/入库的结果提示（给界面显示，说明"为什么没入库"）
 static char lastStoreNote[CFG_BOOK_NOTE_LEN] = "";
 
@@ -181,6 +193,7 @@ static void cmdTouch(const char *arg);
 static void cmdDebug(const char *arg);
 static void cmdFlash(const char *arg);
 static void cmdBookFlow(const char *arg);
+static void cmdBooksDiag(const char *arg);
 
 static Stepper28BYJ *getMotor(int index);
 static bool postMechRequest(uint8_t cmd, int32_t arg);
@@ -303,6 +316,10 @@ static void printStatus() {
     printBookList();
     printStepperState();
     printWaveState();
+    // 书单为空时，直接指路到全链路诊断，省得用户不知道下一步敲什么
+    if (g_books.count() == 0) {
+        Serial.println("书单是空的 -> 敲 j 看 识别->入库 全链路诊断（会指出卡在哪一步）");
+    }
 
     StorageStatus st = {};
     storage.status(st);
@@ -445,6 +462,7 @@ static void cmdLoadSlot(const char *arg) {
 static void cmdParam(const char *arg) {
     husky.dumpAlgoParam();
 }
+
 
 // 串口命令 b：书列表页 + 书单操作
 //   b          跳到书列表页并打印条数
@@ -1261,6 +1279,87 @@ static void cmdFlash(const char *arg) {
     Serial.println("存储命令: q 看状态 | q,s 保存 | q,l 加载 | q,c 清书单 | q,r 重置位置 | q,f 全清");
 }
 
+// =============================================================================
+// 串口命令 j：识别 -> 入库 全链路诊断
+//
+// 为什么要有它：从"二哈看到书"到"动态数组里真的多一条"中间有好几道关卡：
+//   算法不对 -> 分类 ID 无效 -> 防抖没攒够 -> 判定已存在 -> 位置无效 -> 流程忙 -> 队列满
+// 任何一道没过，现象都是"数组里还是空的"，光看现象分不出是哪一步。
+// 这个命令把每一道关卡的当前值一次全打出来。
+// =============================================================================
+static void cmdBooksDiag(const char *arg) {
+    (void)arg;
+
+    Serial.println("----- 识别 -> 入库 全链路诊断 -----");
+
+    // ① 二哈连接与算法
+    Serial.printf("1) 二哈: %s, 当前算法=%s(下标 %d)\n",
+                  husky.online() ? "在线" : "离线", husky.modeName(),
+                  (int)husky.modeIndex());
+    // 分类识别必须用"分类类"算法；如果是"物体识别/OCR"，ID 不是 1~6，永远进不了库。
+    const char *modeName = husky.modeName();
+    bool modeOk = (strstr(modeName, "分类") != nullptr);
+    if (!modeOk) {
+        Serial.println("   ⚠️ 当前不是分类算法！请敲 a,2(物体分类) 或 a,3(自学习分类)");
+    }
+
+    // ② 最近一帧的原始识别结果
+    Serial.printf("2) 最近一帧: 识别块=%d, 分类 ID=%d", (int)recogLastWords,
+                  (int)recogLastId);
+    if (recogLastId >= 0) {
+        Serial.printf(" -> %s", getBookNameById(recogLastId));
+    }
+    Serial.printf("  (算法=%s)\n", recogModeText);
+
+    // ③ 防抖进度
+    Serial.printf("3) 防抖: 同一个 ID 已连续稳定 %u / 需要 %d 帧\n",
+                  (unsigned)recogStable, CFG_BOOK_CONFIRM_FRAMES);
+
+    // ④ 分类 ID 是否有效
+    if (recogLastId < 0) {
+        Serial.println("4) 分类 ID: 画面里没有目标（或没读到帧）");
+    } else if (!bookIdIsValid(recogLastId)) {
+        Serial.printf("4) 分类 ID: ❌ %d 不在 1~6 —— 这个 ID 永远不会入库\n",
+                      (int)recogLastId);
+        Serial.println("   常见原因: ① 算法不是分类类(a,2/a,3)；② 二哈里的标签 ID 不是 1~6");
+    } else {
+        Serial.printf("4) 分类 ID: ✅ %d = %s\n", (int)recogLastId,
+                      getBookNameById(recogLastId));
+        if (bookExists(g_books, recogLastId)) {
+            Serial.println("   ⚠️ 这个学科已经在书单里了 —— 方案A 规定不重复入库");
+        }
+    }
+
+    // ⑤ 动态数组现状
+    Serial.printf("5) 动态数组: 共 %d 条 (容量 %d, 版本 %lu)\n",
+                  (int)g_books.count(), (int)g_books.capacity(),
+                  (unsigned long)g_books.version());
+    if (g_books.count() > 0) {
+        printBookList();
+    } else {
+        Serial.println("   （空）还没有任何书进去");
+    }
+
+    // ⑥ 存书流程的门禁
+    Serial.printf("6) 存书流程: 状态=%u, 等放书确认=%s\n", (unsigned)flowState,
+                  storeWaitingConfirm ? "是" : "否");
+    Serial.printf("   机械位置有效=%s, 需要人工归零=%s\n",
+                  mechanism.positionValid() ? "是" : "否",
+                  mechanism.needHoming() ? "是" : "否");
+    if (!mechanism.positionValid()) {
+        Serial.println("   ⚠️⚠️ 位置无效 -> 存书请求会被拒绝，书永远进不了数组！");
+        Serial.println("        先人工归零: 串口 g,zero（或进调试页按按键3）");
+    }
+
+    // ⑦ 最后一次判定结果
+    Serial.printf("7) 最近判定: %s\n",
+                  (recogNote[0] != 0) ? recogNote : "（还没有结果）");
+    if (lastStoreNote[0] != 0) {
+        Serial.printf("   界面提示: %s\n", lastStoreNote);
+    }
+
+    Serial.println("----- 排查顺序: 1(算法) -> 4(ID) -> 3(防抖) -> 6(位置) -> 5(数组) -----");
+}
 // 串口命令 v：存书 / 取书流程（v = Volume，取"书本"的意思）
 //   v            看当前流程状态和用法
 //   v,s,<分类ID> 请求存书。例: v,s,2 = 把《数学》入库
@@ -1380,6 +1479,8 @@ static void registerCommands() {
     cli.registerCommand('w', "保存知识库(默认槽位0, 支持 w,1)", cmdSaveSlot);
     cli.registerCommand('o', "读取知识库(默认槽位0, 支持 o,1)", cmdLoadSlot);
     cli.registerCommand('p', "读算法参数(调试OCR)", cmdParam);
+    cli.registerCommand('j', "识别->入库 全链路诊断(数组为空时先敲这个)",
+                        cmdBooksDiag);
     cli.registerCommand('b', "书列表页: b 看列表页, b,a[,N] 加N条测试书, b,p 打印书单",
                         cmdBooks);
     cli.registerCommand('c', "清空书籍数据(不动机械位置)", cmdClearBooks);
@@ -1661,17 +1762,33 @@ static void recogTask(void *pvParameters) {
                 // 画面里没有目标：清防抖计数，不入库（符合"无有效识别内容不添加书籍"）
                 stableCount = 0;
                 lastRawId = -1;
+                recogLastId = -1;
+                recogLastWords = 0;
+                recogStable = 0;
+                recogModeText = husky.modeName();
+                recogModeIdx = husky.modeIndex();
+                snprintf(recogNote, sizeof(recogNote), "画面里 0 个识别块(wordNum=0)");
             } else {
                 // 取第一个识别块（分类算法下通常只有 1 个）
                 int16_t id = (int16_t)frame.words[0].id;
+
+                // 每帧都记诊断信息，串口命令 j 一眼看出卡在哪一步
+                recogLastId = id;
+                recogLastWords = frame.wordNum;
+                recogModeText = husky.modeName();
+                recogModeIdx = husky.modeIndex();
 
                 if (!bookIdIsValid(id)) {
                     // 无效分类 ID：不入库、不触发机械动作，只在 ID 变化时提示一次
                     if (id != lastRawId) {
                         Serial.printf("识别: 分类 ID %d 无效(不在 1~6)，忽略\n",
                                       (int)id);
+                        Serial.printf("  当前算法=%s(下标 %d)。分类识别要切到 分类类算法：a,2 物体分类 或 a,3 自学习分类\n",
+                                      husky.modeName(), (int)husky.modeIndex());
                         snprintf(lastStoreNote, sizeof(lastStoreNote),
                                  "识别到无效 ID=%d，未入库", (int)id);
+                        snprintf(recogNote, sizeof(recogNote),
+                                 "ID=%d 无效(不在 1~6)：算法不对或标签没学习", (int)id);
                     }
                     stableCount = 0;
                     lastRawId = id;
@@ -1690,6 +1807,8 @@ static void recogTask(void *pvParameters) {
                                       CFG_BOOK_CONFIRM_FRAMES);
                     }
 
+                    recogStable = stableCount;
+
                     // 稳定够了，而且这个 ID 还没处理过 -> 投存书请求（只投一次）
                     if (stableCount >= CFG_BOOK_CONFIRM_FRAMES && id != lastHandledId) {
                         lastHandledId = id;
@@ -1700,14 +1819,27 @@ static void recogTask(void *pvParameters) {
                                           getBookNameById(id));
                             snprintf(lastStoreNote, sizeof(lastStoreNote),
                                      "%s 已存在，未重复入库", getBookNameById(id));
+                            snprintf(recogNote, sizeof(recogNote),
+                                     "%s 已在书单里(ID=%d)，按方案A不重复入库",
+                                     getBookNameById(id), (int)id);
                             notify("该学科书籍已存在，未入库", CFG_MESSAGE_HOLD_MS);
                         } else {
                             Serial.printf("识别: %s 稳定 %d 帧, 请求入库\n",
                                           getBookNameById(id), CFG_BOOK_CONFIRM_FRAMES);
                             snprintf(lastStoreNote, sizeof(lastStoreNote),
                                      "请求入库 %s", getBookNameById(id));
+                            snprintf(recogNote, sizeof(recogNote),
+                                     "已投出存书请求 %s(ID=%d)，等 stepperTask 处理",
+                                     getBookNameById(id), (int)id);
                             if (postMechRequest(MECH_REQ_STORE_BOOK, (int32_t)id)) {
                                 display.setPage(PAGE_DEBUG);   // 跳到调试页让用户看流程
+                            } else {
+                                // 队列满：清掉"处理过"的标记，下一帧还能重试，
+                                // 否则这个 ID 就永远不再请求了，看起来就是"识别到但进不了数组"
+                                lastHandledId = -1;
+                                snprintf(recogNote, sizeof(recogNote),
+                                         "存书请求队列满，下一帧重试");
+                                Serial.println("识别: 存书请求队列满，下一帧重试");
                             }
                         }
                     }
@@ -1866,6 +1998,20 @@ static void printWaveState() {
         xSemaphoreTake(waveMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
         snap = waveState;
         xSemaphoreGive(waveMutex);
+    }
+
+    // ⚠️ 先判"测距到底有没有在跑"：CFG_ENABLE_WAVE=0 时任务不建、引脚不配，
+    //    串口一条日志都没有，很容易被误判成"传感器坏/接线错"。
+    if (!CFG_RUN_WAVE) {
+        Serial.println("测距: ❌ 没启用（config.h 的 CFG_ENABLE_WAVE=0）");
+        Serial.println("      后果: 不建 waveTask、TRIG/ECHO 连 pinMode 都没配 -> 永远测不到");
+        Serial.println("      改法: 把 CFG_ENABLE_WAVE 改成 1（并确认测距引脚不和升降电机抢）");
+        return;
+    }
+    if (snap.totalCount == 0) {
+        Serial.printf("测距: 还没测过（TRIG=GPIO%d ECHO=GPIO%d, 周期 %dms）\n",
+                      PIN_WAVE_TRIG, PIN_WAVE_ECHO, WAVE_MEASURE_INTERVAL_MS);
+        Serial.println("      刚上电要等一个测量周期；一直是这样就是任务没跑起来");
     }
 
     Serial.printf("测距: %u mm (%u.%u cm), %s, err=%u\n",
