@@ -476,16 +476,29 @@ bool StorageLib::_loadLocked(BookList &books, int32_t &outLiftSteps,
             //    否则后面 snprintf/strcmp 会顺着越界内存读下去。
             recs[i].text[HUSKY_TEXT_LEN - 1] = '\0';
 
-            if (!storageIdIsValid(recs[i].id)) {
-                Serial.printf("存储: 丢弃非法条目（id=%d 不在 %d~%d 之间，text='%s'）\n",
+            // ⚠️ id==0 是"无学科/测试条目"（串口 b,a,N 造出来的测试书就是 id=0），
+            //    它**必须**能通过校验：写入端 _writeBlobLocked() 不做 id 过滤、
+            //    照样把 id=0 写进 Flash，读取端要是把它当"非法条目"丢掉，
+            //    现象就是"保存成功、重启后书单 0 条" —— 用户想在没有二哈的情况下
+            //    验证书单持久化，这条路会被彻底堵死。
+            //    ⚠️ 注意**不要**去放宽 bookIdIsValid()：那是业务唯一来源，
+            //    id=0 不属于任何学科，业务入库（bookAddAtTop）必须继续拒绝它。
+            //    两处规则分开写在这里，谁也不许动谁。
+            if (recs[i].id != 0 && !storageIdIsValid(recs[i].id)) {
+                Serial.printf("存储: 丢弃非法条目（id=%d 既不是 0(测试) 也不在 %d~%d，text='%s'）\n",
                               (int)recs[i].id, BOOK_ID_MIN, BOOK_ID_MAX, recs[i].text);
                 continue;
             }
+            // 去重**只对 id!=0 的学科条目**做：方案A 是"一个学科最多一本"，
+            // 而多条 id=0 的测试书是合法的，不能被当成"重复 id"丢掉
+            //（否则 b,a,3 造 3 条，重启只会恢复 1 条）。
             bool dup = false;
-            for (int16_t k = 0; k < kept; k++) {
-                if (recs[k].id == recs[i].id) {
-                    dup = true;
-                    break;
+            if (recs[i].id != 0) {
+                for (int16_t k = 0; k < kept; k++) {
+                    if (recs[k].id == recs[i].id) {
+                        dup = true;
+                        break;
+                    }
                 }
             }
             if (dup) {

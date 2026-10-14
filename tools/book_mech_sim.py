@@ -354,10 +354,16 @@ def load_books(raw, expect_version=1, version=1, max_books=16, lift_range=CFG_ST
     books = []
     for item in raw:
         book_id = item.get("id", 0)
-        if not book_id_is_valid(book_id):
-            continue                          # id 不在 1~6：丢弃该条
-        if book_find_index_by_id(books, book_id) >= 0:
-            continue                          # 重复 id：只保留第一条
+        # id==0 是"无学科/测试条目"（串口 b,a,N 造出来的测试书就是 id=0），**放行**。
+        # 对应真代码 StorageLib.cpp 的 _loadLocked()：写入端不做 id 过滤，
+        # 读取端要是把 id=0 丢掉，就变成"保存成功、重启 0 条"。
+        # 注意 book_id_is_valid()（对应 bookIdIsValid()）本身**不放开**，
+        # 业务入库仍然只认 1~6，规则分开判。
+        if book_id != 0 and not book_id_is_valid(book_id):
+            continue                          # id 不在 0 / 1~6：丢弃该条
+        # 去重只对学科 id 做（方案A：一个学科最多一本）；多条 id=0 测试书是合法的
+        if book_id != 0 and book_find_index_by_id(books, book_id) >= 0:
+            continue                          # 重复学科 id：只保留第一条
         text = (item.get("text") or "")[:39]  # text 强制补结束符（这里用截断模拟）
         books.append({"id": book_id, "count": item.get("count", 1), "text": text})
     steps = raw_lift = 0
@@ -435,6 +441,18 @@ def main():
     ok, bs, _, _, _ = load_books([{"id": 1, "text": "语文"}, {"id": 1, "text": "语文2"}, {"id": 9, "text": "X"}])
     check("非法 id 被丢弃", ok and [b["id"] for b in bs] == [1])
     check("重复 id 只保留第一条", ok and bs[0]["text"] == "语文")
+    # id=0 的测试条目必须原样恢复（串口 b,a,N 造的测试书 + q,s 存盘 + 重启）
+    # 真代码对应：StorageLib.cpp 的 _loadLocked() 里 "id != 0 && !storageIdIsValid(id)" 才丢弃
+    ok, bs, _, _, _ = load_books([{"id": 0, "text": "测试书 1"}, {"id": 0, "text": "测试书 2"},
+                                  {"id": 0, "text": "测试书 3"}])
+    check("id=0 测试条目全部保留(3 条, 不能只留 1 条)",
+          ok and [b["text"] for b in bs] == ["测试书 1", "测试书 2", "测试书 3"], str(bs))
+    check("id=0 条目的 id 原样是 0", ok and [b["id"] for b in bs] == [0, 0, 0], str(bs))
+    # 混合场景：2 条测试书 + 1 本真学科书，重启后 3 条都要在；id=99 仍必须被丢弃
+    ok, bs, _, _, _ = load_books([{"id": 0, "text": "测试书 1"}, {"id": 2, "text": "数学"},
+                                  {"id": 0, "text": "测试书 2"}, {"id": 99, "text": "坏数据"}])
+    check("混合场景: id=0 与 1~6 都恢复，id=99 仍被丢弃",
+          ok and [b["id"] for b in bs] == [0, 2, 0], str(bs))
     ok, _, _, _, _ = load_books([{"id": i} for i in range(1, 20)], max_books=16)
     check("条数越界判损坏", not ok)
     ok, _, _, _, _ = load_books([{"id": 1}], version=2, expect_version=1)
