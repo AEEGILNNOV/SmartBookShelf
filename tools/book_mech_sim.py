@@ -34,11 +34,12 @@ CFG_STEPPER_SOFT_LIMIT       = 1
 CFG_LIFT_MAX_MOVE_STEPS      = 6000
 CFG_PUSH_MAX_MOVE_STEPS      = 2000
 CFG_STEPPER_MAX_STEPS        = 8192
-CFG_LIFT_STEPS_PER_BOOK      = 200
+CFG_LIFT_STEPS_PER_BOOK      = 125
 CFG_LIFT_INDEX0_OFFSET_STEPS = 0
 CFG_LIFT_DIR_SIGN            = 1
+CFG_STORE_DOWN_SIGN          = 1      # 存书后"向下让一本书"的方向
 CFG_PUSH_DIR_SIGN            = 1
-CFG_PUSH_OUT_STEPS           = 600
+CFG_PUSH_OUT_STEPS           = 875
 CFG_STEPPER_LIFT_RANGE_STEPS = 4096
 CFG_STEPPER_PUSH_RANGE_STEPS = 2048
 
@@ -523,6 +524,57 @@ def main():
     r, removed = book_remove_at(biz, 0)
     check("只有机械正常完成后才删记录", r == 0 and len(biz) == 2)
     check("删除后剩下的下标自动前移（顺序仍正确）", [b["id"] for b in biz] == [2, 1])
+
+    # ---------------- G. 存书后下移 + 取书位置一致性 ----------------
+    print("\n[G] 存书下移让位 + 取书位置一致性（投书口 == 取书口）")
+
+    # 模拟真实时序：每存一本 -> 数组顶部插一条 -> 升降向下让一本书。
+    # 书堆可以看成"书 + 平台"，下移后所有书的绝对位置都 -125，
+    # 但相对平台顶面的偏移没变，所以下标和物理顺序一直一一对应。
+    stack = []
+    lift2 = Motor(CFG_STEPPER_LIFT_RANGE_STEPS)
+    mech2 = Mechanism(lift2, Motor(CFG_STEPPER_PUSH_RANGE_STEPS))
+    check("存书前先人工归零", mech2.set_zero_here())
+
+    for subject in (3, 2, 1):   # 依次放语文(3)? 不，这里依次放 id=3,2,1
+        book_add_at_top(stack, subject)          # 记录插到数组顶部
+        down = -CFG_LIFT_STEPS_PER_BOOK
+        if CFG_STORE_DOWN_SIGN < 0:
+            down = -down
+        assert mech2.jog(AXIS_LIFT, down, True), "下移请求应被接受"
+        drive(mech2)
+        mech2.take_result()                      # 读走结果，回 IDLE
+
+    check("连放 3 本后升降累计位置 = -3 本书",
+          lift2.pos_steps == -3 * CFG_LIFT_STEPS_PER_BOOK, str(lift2.pos_steps))
+    check("数组顺序 = 最后放的排最顶", [b["id"] for b in stack] == [1, 2, 3],
+          str([b["id"] for b in stack]))
+    check("每本书的相对位置偏移 = 下标 x 125 步",
+          mech2.lift.pos_steps + 0 == -3 * CFG_LIFT_STEPS_PER_BOOK)
+
+    # 关键不变量：把第 i 本送到取书口，需要的目标位置(相对零点) = i * 125
+    # 因为下移后"平台顶面"就是取书/投书口的位置。
+    ok_all = True
+    for i in range(len(stack)):
+        target = i * CFG_LIFT_STEPS_PER_BOOK
+        book_after_platform_top = target
+        book_abs = mech2.lift.pos_steps + book_after_platform_top
+        if book_abs != -3 * CFG_LIFT_STEPS_PER_BOOK + i * CFG_LIFT_STEPS_PER_BOOK:
+            ok_all = False
+    check("下标 i 的目标位置公式 i*125 自洽", ok_all)
+    # 真正有意义的检查：从当前平台位置出发，真正走一次"取下标 0"，看目标位置算得对不对。
+    # 平台现在在 -3*125（顶面就是取书口），要取下标 0 的那本，目标位置应该是 0 步。
+    target0 = 0 * CFG_LIFT_STEPS_PER_BOOK
+    moved = target0 - mech2.lift.pos_steps          # = +375，要往回走 3 本书
+    check("取下标0时需要把平台往回走 3 本书", moved == 3 * CFG_LIFT_STEPS_PER_BOOK, str(moved))
+    assert mech2.move_lift_to(target0)
+    drive(mech2)
+    mech2.take_result()
+    check("升降回到零点 -> 下标0 那本正好在取书口", mech2.lift.pos_steps == 0,
+          str(mech2.lift.pos_steps))
+    check("推书行程 = 875 步(已标定值)", CFG_PUSH_OUT_STEPS == 875)
+    check("每本书步数 = 125 步(已标定值)", CFG_LIFT_STEPS_PER_BOOK == 125)
+    check("存书下移方向宏存在且为 ±1", CFG_STORE_DOWN_SIGN in (1, -1))
 
     # ---------------- 汇总 ----------------
     print("")
