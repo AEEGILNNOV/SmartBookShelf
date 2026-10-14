@@ -1282,7 +1282,7 @@
 // 怎么确认：调试页用 g,up / g,down 各点动一次，看机构实际往哪边走，
 // 如果 g,down 反而往上，就把这个宏改成 -1。
 #ifndef CFG_STORE_DOWN_SIGN
-#define CFG_STORE_DOWN_SIGN 1
+#define CFG_STORE_DOWN_SIGN -1
 #endif
 
 // ==== 两个电机的正反转：改这两行就能翻方向，不用动逻辑 ====

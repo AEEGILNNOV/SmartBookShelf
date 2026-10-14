@@ -861,18 +861,30 @@ static bool flowHomeStarted = false;      // 取书最后"回标准位"是否已
 //    把两者的高度差填到 CFG_LIFT_INDEX0_OFFSET_STEPS 里即可（那个宏就是为这种情况留的）。
 //   【坐标系（用户实机确认过，改公式前一定要看懂）】
 //     · 零点(0) = 空平台：平台面正好在推出口的高度，**最下面那本书**可以被推出来。
-//     · 放一本 -> 平台下降 125 步（-125）；放 n 本 -> 停在 -n × 每本书步数，
-//       这就是"标准位"：书堆顶面正对投书口，下一本能从同一个口放进来。
-//     · 由此得出：**从最下面数第 j 本**（j = 0,1,2...）能被推出时，平台位置 = -j × 每本书步数。
+//     · 放一本 -> 位置 +125；放 n 本 -> 停在 **+n × 每本书步数**，这就是"标准位"：
+//       书堆顶面正对投书口，下一本能从同一个口放进来。
+//       ⚠️ 是**正**的（越放越大），和 CFG_STORE_DOWN_SIGN = -1 是配套的 —— 这一条
+//          已被用户实机日志证实：3 本时位置 = +375。
+//     · 由此得出：**从最下面数第 j 本**（j = 0,1,2...）能被推出时，平台位置 = **+j × 每本书步数**。
 //     · 数组是"顶 -> 底"，下标 0 = 最上面（最新放的那本），
 //       所以下标 i 对应从下面数 j = (总数 - 1 - i)。
 //   于是：
-//     目标位置 = CFG_LIFT_INDEX0_OFFSET_STEPS - (总数 - 1 - 下标) × 每本书步数
-//   ⚠️ 以前这里写的是 `下标 × 每本书步数`（正值），**方向是反的**：
-//      只有"下标 0 且书堆只有 1 本"时碰巧对，取下面几本会往反方向走。
-//      例：3 本、标准位 -375 时，取下标0 -> -250、下标1 -> -125、下标2 -> 0。
+//     目标位置 = CFG_LIFT_INDEX0_OFFSET_STEPS + (总数 - 1 - 下标) × 每本书步数
+//   ⚠️ 符号改过两次，别再凭直觉改：
+//      最早写成 `+下标 × 每本书步数`（错），后来被我改成负号（也错，取书时平台朝反方向走），
+//      2026-xx 按用户实测日志改回**正号**：3 本、标准位 +375 时，取下标0 -> +250（只走 -125）。
 //   ⚠️ CFG_LIFT_STEPS_PER_BOOK 必须是**实机标定**出来的（见 config.h 9.1 节）。
 //   ⚠️ 开环系统：这个公式算的是"软件以为的位置"，堵转/丢步/齿轮间隙都会让它偏。
+//
+// 【符号不再靠猜：和 CFG_STORE_DOWN_SIGN 联动】
+//   存书让位时每本书把位置改动多少，就决定了整个升降坐标系的正负：
+//     CFG_STORE_DOWN_SIGN < 0 -> 每存一本位置 +125 -> 深度符号 +1（用户实机就是这一档）
+//     CFG_STORE_DOWN_SIGN > 0 -> 每存一本位置 -125 -> 深度符号 -1
+//   取书公式一律乘这个符号，所以"存书是正的、取书按负的算"这种错位不可能再出现。
+static int32_t liftDepthSign() {
+    return (CFG_STORE_DOWN_SIGN < 0) ? 1 : -1;
+}
+
 static int32_t calcLiftTargetForIndex(int16_t index, int16_t total) {
     if (index < 0) {
         index = 0;
@@ -884,7 +896,8 @@ static int32_t calcLiftTargetForIndex(int16_t index, int16_t total) {
         index = (int16_t)(total - 1);
     }
     int32_t j = (int32_t)(total - 1 - index);   // 从最下面数第几本（0 = 最下面那本）
-    return CFG_LIFT_INDEX0_OFFSET_STEPS - j * (int32_t)CFG_LIFT_STEPS_PER_BOOK;
+    return CFG_LIFT_INDEX0_OFFSET_STEPS +
+           liftDepthSign() * j * (int32_t)CFG_LIFT_STEPS_PER_BOOK;
 }
 
 // 取书最后要停的"标准位"：书堆顶面正对投书口，新书能从同一个口顺利投入。
@@ -893,8 +906,8 @@ static int32_t calcLiftStandardPos(int16_t bookCount) {
     if (bookCount < 0) {
         bookCount = 0;
     }
-    return CFG_LIFT_INDEX0_OFFSET_STEPS -
-           (int32_t)bookCount * (int32_t)CFG_LIFT_STEPS_PER_BOOK;
+    return CFG_LIFT_INDEX0_OFFSET_STEPS +
+           liftDepthSign() * (int32_t)bookCount * (int32_t)CFG_LIFT_STEPS_PER_BOOK;
 }
 
 // 存书前检查：ID 合法 + 没重复 + 位置有效，全部通过返回 BOOK_OK
@@ -1555,7 +1568,7 @@ static void stepperTask(void *pvParameters) {
                     // 目标 = -(总数-1-下标) x 每本书步数；见 calcLiftTargetForIndex 的坐标系说明
                     int32_t target = calcLiftTargetForIndex(idx, total);
                     Serial.printf("取书: 请求《%s》(下标 %d, 共 %d 本, 从最下面数第 %d 本)\n",
-                                  getBookNameById(item.id), (int)idx, (int)total - 1,
+                                  getBookNameById(item.id), (int)idx, (int)total,
                                   (int)(total - 1 - idx));
                     Serial.printf("      升降目标 = %ld 步, 当前 = %ld 步, 需要走 %ld 步\n",
                                   (long)target, (long)mechanism.liftSteps(),

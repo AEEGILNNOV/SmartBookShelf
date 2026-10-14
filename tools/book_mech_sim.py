@@ -37,7 +37,7 @@ CFG_STEPPER_MAX_STEPS        = 8192
 CFG_LIFT_STEPS_PER_BOOK      = 125
 CFG_LIFT_INDEX0_OFFSET_STEPS = 0
 CFG_LIFT_DIR_SIGN            = 1
-CFG_STORE_DOWN_SIGN          = 1      # 存书后"向下让一本书"的方向
+CFG_STORE_DOWN_SIGN          = -1     # 用户实机: 存书让位后位置从 +125 开始递增(与 config.h 一致)
 CFG_PUSH_DIR_SIGN            = -1   # 本机实测: 推出 = run() 负数, 拉回 = run() 正数
 CFG_PUSH_OUT_STEPS           = 875
 CFG_STEPPER_LIFT_RANGE_STEPS = 4096
@@ -570,9 +570,9 @@ def main():
     # ---------------- G. 存书后下移 + 取书位置一致性 ----------------
     print("\n[G] 存书下移让位 + 取书位置一致性（投书口 == 取书口）")
 
-    # 模拟真实时序：每存一本 -> 数组顶部插一条 -> 升降向下让一本书。
-    # 书堆可以看成"书 + 平台"，下移后所有书的绝对位置都 -125，
-    # 但相对平台顶面的偏移没变，所以下标和物理顺序一直一一对应。
+    # 模拟真实时序：每存一本 -> 数组顶部插一条 -> 升降让一本书。
+    # ⚠️ 记账符号由 CFG_STORE_DOWN_SIGN 决定；用户实机是 -1，所以每存一本位置 +125（正的）。
+    # 相对平台顶面的偏移不变，所以下标和物理顺序一直一一对应。
     stack = []
     lift2 = Motor(CFG_STEPPER_LIFT_RANGE_STEPS)
     mech2 = Mechanism(lift2, Motor(CFG_STEPPER_PUSH_RANGE_STEPS))
@@ -587,37 +587,42 @@ def main():
         drive(mech2)
         mech2.take_result()
 
-    check("连放 3 本后升降累计位置 = -3 本书",
-          lift2.pos_steps == -3 * CFG_LIFT_STEPS_PER_BOOK, str(lift2.pos_steps))
+    check("连放 3 本后升降累计位置 = +3 本书",
+          lift2.pos_steps == 3 * CFG_LIFT_STEPS_PER_BOOK, str(lift2.pos_steps))
     check("数组顺序 = 最后放的排最顶", [b["id"] for b in stack] == [1, 2, 3],
           str([b["id"] for b in stack]))
 
-    # 关键不变量（**本次修正**）：把"从最下面数第 j 本"送到推出口，目标位置 = -j x 125。
+    # 关键不变量（**符号已按用户实测改正**）：把"从最下面数第 j 本"送到推出口，目标 = +j x 125。
     # 【坐标系（用户实机确认）】
     #   0   = 空平台：平台面正好在推出口的高度，最下面那本可以被推出来；
-    #   放 n 本 -> 标准位 = -n x 125（书堆顶面正对投书口，新书能从同一个口放进来）；
+    #   放 n 本 -> 标准位 = **+n x 125**（书堆顶面正对投书口，新书能从同一个口放进来）；
     #   数组是 顶->底（下标 0 = 最上面），所以下标 i 对应从下面数 j = n-1-i。
-    #   ⚠️ 以前代码写的是 +i x 125（方向反了），只有"下标0 且只有 1 本"时碰巧对。
+    #   ⚠️ 符号改过两次：先写 +i x 125（错），后来改成负号（也错，取书时平台朝反方向走），
+    #      最后按用户实测日志（3 本时位置 = +375）改回**正号**。
+    # 深度记账符号：和真代码 liftDepthSign() 一致 —— 由 CFG_STORE_DOWN_SIGN 唯一决定
+    depth_sign = 1 if CFG_STORE_DOWN_SIGN < 0 else -1
+
     def target_of(index, total):
-        return -(total - 1 - index) * CFG_LIFT_STEPS_PER_BOOK
+        return depth_sign * (total - 1 - index) * CFG_LIFT_STEPS_PER_BOOK
 
     n = len(stack)
-    check("3 本时的标准位 = -375",
-          mech2.lift.pos_steps == -n * CFG_LIFT_STEPS_PER_BOOK, str(mech2.lift.pos_steps))
-    check("3 本取下标0(最上面) -> 目标 -250", target_of(0, n) == -250, str(target_of(0, n)))
-    check("3 本取下标1(中间)   -> 目标 -125", target_of(1, n) == -125, str(target_of(1, n)))
+    check("3 本时的标准位 = +375",
+          mech2.lift.pos_steps == depth_sign * n * CFG_LIFT_STEPS_PER_BOOK,
+          str(mech2.lift.pos_steps))
+    check("3 本取下标0(最上面) -> 目标 +250", target_of(0, n) == 250, str(target_of(0, n)))
+    check("3 本取下标1(中间)   -> 目标 +125", target_of(1, n) == 125, str(target_of(1, n)))
     check("3 本取下标2(最下面) -> 目标 0", target_of(2, n) == 0, str(target_of(2, n)))
-    # 真正走一次：从标准位 -375 取下标 0（最上面那本），只需要往上 125
+    # 真正走一次：从标准位 +375 取下标 0（最上面那本），只走一本书的距离
     moved0 = target_of(0, n) - mech2.lift.pos_steps
-    check("取下标0 只需要往上移 125 步(不是 375)", moved0 == 125, str(moved0))
+    check("取下标0 只需要走 -125（一本书的距离，不是 -625）", moved0 == -125, str(moved0))
     assert mech2.move_lift_to(target_of(0, n))
     drive(mech2)
     mech2.take_result()
-    check("取下标0 后平台停在 -250（那本正好在推出口）",
-          mech2.lift.pos_steps == -250, str(mech2.lift.pos_steps))
-    # 取完 1 本只剩 2 本 -> 标准位 = -250，正好就是现在这个位置（不用再动）
-    check("取完1本剩2本的标准位 = 现在的位置(-250)",
-          -(n - 1) * CFG_LIFT_STEPS_PER_BOOK == mech2.lift.pos_steps,
+    check("取下标0 后平台停在 +250（那本正好在推出口）",
+          mech2.lift.pos_steps == 250, str(mech2.lift.pos_steps))
+    # 取完 1 本只剩 2 本 -> 标准位 = +250，正好就是现在这个位置（不用再动）
+    check("取完1本剩2本的标准位 = 现在的位置(+250)",
+          (n - 1) * CFG_LIFT_STEPS_PER_BOOK == mech2.lift.pos_steps,
           str(mech2.lift.pos_steps))
     check("剩2本时取现在下标1(原最下面那本) -> 目标 0",
          target_of(1, 2) == 0, str(target_of(1, 2)))
