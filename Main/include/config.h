@@ -1392,6 +1392,17 @@
 #endif
 
 // 是否在开机时自动加载 Flash 里的书单和位置（0 = 只打开 NVS，不加载）
+// ==== 位置自动落盘 ====
+// 1 = 机械每停一次（点动 / 存书让位 / 取书定位）就自动把"当前升降步数 + 位置有效性"
+//     写进 Flash。用户要求"每次位置改变都自动写入"。
+// 0 = 关掉自动保存，只在重要节点（入库 / 取书 / 人工归零）写。
+//
+// ⚠️ 写入频率说明：一次动作写一次，**不是每个脉冲都写**。
+//    28BYJ 一分钟好几百步，每步都写会把 NVS 很快写坏。
+#ifndef CFG_AUTO_SAVE_ON_MOVE
+#define CFG_AUTO_SAVE_ON_MOVE 1
+#endif
+
 #ifndef CFG_STORAGE_AUTO_LOAD
 #define CFG_STORAGE_AUTO_LOAD 1
 #endif

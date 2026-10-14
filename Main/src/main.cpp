@@ -157,6 +157,21 @@ static volatile bool storeConfirmRequested = false;
 // 电机名字，打印用
 static const char *MOTOR_NAME[2] = { "升降", "推书" };
 
+// ---- 位置自动落盘：机械"刚停下来"就把当前位置写进 Flash ----
+//
+// 为什么要有这个：用户要求"以后每次位置改变（电机移动、或点了归零）都自动写入 Flash"。
+// 实现方式：stepperTask 每轮看一次 mechanism.busy()，
+//   上升沿（开始动）-> 清标记；下降沿（刚停）-> 自动保存一次。
+//
+// ⚠️ 为什么用"busy 从 true 变 false"而不是 takeResult()：
+//    takeResult() 会把结果读走，而存书/取书流程还要用它判断"动作完成没有"，
+//    在这里读走就会把流程卡死。busy() 是只读的，不影响任何流程。
+//
+// ⚠️ 写入频率：一次动作只写一次，**不是每个脉冲都写**。
+//    28BYJ 一分钟好几百步，每步都写 NVS 的话 Flash 很快就被写坏了。
+static bool mechWasBusy = false;      // 上一轮机械是否在动（用来找下降沿）
+static bool autoSavedThisMove = false;// 本次动作是否已经自动保存过（防重复写）
+
 // -----------------------------------------------------------------------------
 // 前置函数声明
 // -----------------------------------------------------------------------------
@@ -1242,6 +1257,27 @@ static void stepperTask(void *pvParameters) {
         // ---- ③ 推进机械状态机（到点才发脉冲，绝不阻塞）----
         mechanism.service();
 
+        // ---- ③.5 位置自动落盘：机械刚停下来就保存 ----
+        // 只看 busy() 的下降沿（在动 -> 停），不消费任何结果，所以不会影响流程。
+#if CFG_AUTO_SAVE_ON_MOVE
+        {
+            bool busyNow = mechanism.busy();
+            if (busyNow) {
+                autoSavedThisMove = false;   // 新一轮动作开始，允许下次停稳再存一次
+            } else if (mechWasBusy && !autoSavedThisMove) {
+                // 刚停：把当前位置 + 位置有效性写进 Flash
+                autoSavedThisMove = true;
+                storage.saveLiftSteps(mechanism.liftSteps());
+                storage.savePositionState(mechanism.positionValid(),
+                                          mechanism.needHoming());
+                Serial.printf("存储: 机械已停止, 自动保存位置 (%ld 步, 位置有效=%s)\n",
+                              (long)mechanism.liftSteps(),
+                              mechanism.positionValid() ? "是" : "否");
+            }
+            mechWasBusy = busyNow;
+        }
+#endif
+
         // ---- ④ 启动新的存书/取书流程 ----
         if (flowState == FLOW_IDLE && flowStartRequested) {
             flowStartRequested = false;
@@ -1315,7 +1351,7 @@ static void cmdFlash(const char *arg) {
 
     if (sub == 0) {
         storage.print();
-        Serial.println("  q,s 保存 | q,l 重新加载 | q,c 只清书单 | q,r 只重置位置 | q,f 全清");
+        Serial.println("  q,s 保存 | q,l 重新加载 | q,k 看 NVS 键 | q,c 只清书单 | q,r 只重置位置 | q,f 全清");
         return;
     }
 
@@ -1368,7 +1404,14 @@ static void cmdFlash(const char *arg) {
         return;
     }
 
-    Serial.println("存储命令: q 看状态 | q,s 保存 | q,l 加载 | q,c 清书单 | q,r 重置位置 | q,f 全清");
+    if (sub == 'k' || sub == 'K') {
+        // 排查"保存成功但开机读不到"：把 NVS 里实际存在的键和值打出来
+        storage.printKeys();
+        Serial.println("  如果 ver 存在=否 或 值=0 -> 版本号没写进去，看看是不是写到了别的命名空间");
+        return;
+    }
+
+    Serial.println("存储命令: q 看状态 | q,k 看 NVS 键 | q,s 保存 | q,l 加载 | q,c 清书单 | q,r 重置位置 | q,f 全清");
 }
 
 // =============================================================================
@@ -1605,6 +1648,7 @@ static void registerCommands() {
 
 // 每个按键"按下时刻"的暂存，用来算按了多久（0 = 当前没有按着）
 static uint32_t buttonDownMs[6] = { 0, 0, 0, 0, 0, 0 };   // 下标 1~5 对应按键 1~5
+
 
 // 页码 -> 中文名，给按键切页时打印用
 static const char *pageName(uint8_t page) {

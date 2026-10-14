@@ -228,7 +228,9 @@ public:
 
     // ---- 状态 / 调试 ----
     void status(StorageStatus &out);
-    void print();                // 串口打印状态（中文），串口命令 f 会调
+    void print();
+    // 打印"NVS 里实际存在哪些键 + 值"：排查"存了但开机读不到"最直接的手段
+    void printKeys();                // 串口打印状态（中文），串口命令 f 会调
 
 private:
     bool _openIfNeeded();

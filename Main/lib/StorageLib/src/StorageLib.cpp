@@ -356,12 +356,24 @@ bool StorageLib::_loadLocked(BookList &books, int32_t &outLiftSteps,
     _dataVersion = flashVersion;
     _versionMatch = (flashVersion == (uint16_t)CFG_STORAGE_DATA_VERSION);
     if (!_versionMatch) {
-        _loadOk = false;
-        _repairNeeded = true;   // 决定权交给用户：本库只报警，不自动迁移，更不清数据
-        _setError("数据版本不匹配");
-        Serial.printf("存储: ⚠️ Flash 数据版本 %u 与本机 %u 不匹配，拒绝加载（数据原样保留，等你决定）\n",
+        // =====================================================================
+        // ⚠️ 【为什么这里改成"尽力加载"而不是直接拒绝】
+        //
+        //   原来的逻辑是"版本号对不上就什么都不加载"，本意是保护数据（怕格式变了读成乱码）。
+        //   但实机上出现过一个更难受的情况：浏览器版本键读出来是 0（键缺失/写失败），
+        //   于是**每次开机都不载入，书单永远是空的**，用户看到的就是"存进去了但开机没有"。
+        //
+        //   现在的做法：版本对不上时**先尝试加载**，但走"全量校验"这条路 ——
+        //     ① 书单 blob 的长度必须和头部记录的条数**完全吻合**（不吻合就绝不解析）；
+        //     ② 每条书都要过 id 1~6 + 去重校验。
+        //   校验通过 -> 数据是可信的，载入并**立刻用当前版本号重写一遍**（自我修复）；
+        //   校验不过 -> 退回原来的行为：不加载、置 repairNeeded、**绝不清数据**。
+        //
+        //   这样即使键缺失/版本漂移，用户也不会丢书；而真的格式不兼容时仍然安全。
+        // =====================================================================
+        Serial.printf("存储: ⚠️ Flash 数据版本 %u 与本机 %u 不匹配，先尝试按当前格式校验加载\n",
                       (unsigned)flashVersion, (unsigned)CFG_STORAGE_DATA_VERSION);
-        return false;
+        _repairNeeded = true;   // 先置上：下面校验通过才清掉
     }
 
     // ---- 2) 升降步数 / 位置有效性 / 归零需求 / 未完成动作标记 ----
@@ -530,6 +542,20 @@ bool StorageLib::_loadLocked(BookList &books, int32_t &outLiftSteps,
         Serial.printf("存储: 加载完成（书单 %d 条，升降 %ld 步，位置有效=%s 需归零=%s）\n",
                       (int)_bookCount, (long)_liftSteps,
                       storageYesNo(_positionValid), storageYesNo(_needHoming));
+
+        // ---- 自我修复：校验通过说明数据是可信的，把版本号补成当前版本 ----
+        // 为什么必须做：版本键缺失/对不上时，如果不补写，下次上电又要走一遍
+        // "尽力加载"，而且 repairNeeded 会一直挂着、界面一直报警。
+        if (!_versionMatch) {
+            if (_writeVersionLocked()) {
+                _repairNeeded = false;   // 修好了，不用再报警
+                Serial.println("存储: 已把 Flash 版本号补写为当前版本（自我修复）");
+            } else {
+                Serial.println("存储: ⚠️ 版本号补写失败，下次上电仍会走一次兼容加载");
+            }
+        } else {
+            _repairNeeded = false;
+        }
     }
     return booksOk;
 }
@@ -785,6 +811,52 @@ void StorageLib::status(StorageStatus &out) {
 }
 
 // 串口命令 f 会调它。格式跟其它库保持一致：每行"存储: ..."
+// =============================================================================
+// 打印 NVS 里实际存在哪些键
+//
+// 为什么要有它：出现"明明保存成功、开机却说没有历史数据"时，
+// 光看业务日志分不清是"键根本没写进去"还是"读的时候版本对不上"。
+// 这个函数把每个键是否存在、值是多少直接打出来，一眼定位。
+// =============================================================================
+void StorageLib::printKeys() {
+    if (!_takeLock("打印 NVS 键")) {
+        return;
+    }
+    if (!_openIfNeeded()) {
+        xSemaphoreGive(_mutex);
+        return;
+    }
+
+    Serial.printf("存储: ---- NVS 键清单（命名空间 %s）----\n", CFG_STORAGE_NVS_NAMESPACE);
+    Serial.printf("  %-8s 存在=%s  值=%u (本机版本 %u)\n", STORAGE_KEY_VERSION,
+                  storageYesNo(_prefs.isKey(STORAGE_KEY_VERSION)),
+                  (unsigned)_prefs.getUShort(STORAGE_KEY_VERSION, 0),
+                  (unsigned)CFG_STORAGE_DATA_VERSION);
+    Serial.printf("  %-8s 存在=%s  长度=%u 字节\n", STORAGE_KEY_BOOKS,
+                  storageYesNo(_prefs.isKey(STORAGE_KEY_BOOKS)),
+                  (unsigned)_prefs.getBytesLength(STORAGE_KEY_BOOKS));
+    Serial.printf("  %-8s 存在=%s  值=%ld\n", STORAGE_KEY_LIFT,
+                  storageYesNo(_prefs.isKey(STORAGE_KEY_LIFT)),
+                  (long)_prefs.getInt(STORAGE_KEY_LIFT, 0));
+    Serial.printf("  %-8s 存在=%s  值=%s\n", STORAGE_KEY_POSVALID,
+                  storageYesNo(_prefs.isKey(STORAGE_KEY_POSVALID)),
+                  storageYesNo(_prefs.getBool(STORAGE_KEY_POSVALID, false)));
+    Serial.printf("  %-8s 存在=%s  值=%s\n", STORAGE_KEY_HOMING,
+                  storageYesNo(_prefs.isKey(STORAGE_KEY_HOMING)),
+                  storageYesNo(_prefs.getBool(STORAGE_KEY_HOMING, true)));
+    Serial.printf("  %-8s 存在=%s  值=%s\n", STORAGE_KEY_PENDING,
+                  storageYesNo(_prefs.isKey(STORAGE_KEY_PENDING)),
+                  storageYesNo(_prefs.getBool(STORAGE_KEY_PENDING, false)));
+    Serial.printf("  %-8s 存在=%s  值=%lu\n", STORAGE_KEY_SAVECNT,
+                  storageYesNo(_prefs.isKey(STORAGE_KEY_SAVECNT)),
+                  (unsigned long)_prefs.getUInt(STORAGE_KEY_SAVECNT, 0));
+    Serial.println("  判读: 如果 ver 存在=否 -> 版本号从来没写进去；");
+    Serial.println("        如果 ver 存在=是 但值=0 -> 写的是别的键/别的命名空间；");
+    Serial.println("        如果 books 存在=是 长度为 0 -> 书单没写进去。");
+
+    xSemaphoreGive(_mutex);
+}
+
 void StorageLib::print() {
     StorageStatus st;
     status(st);
