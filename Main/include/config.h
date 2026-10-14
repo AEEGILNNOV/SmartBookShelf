@@ -1289,6 +1289,21 @@
 // **不能**由 LVGL 事件回调直接操作 GPIO，也不能在显示任务里等电机走完。
 // -----------------------------------------------------------------------------
 // 三档点动步长。改动范围受 CFG_STEPPER_MAX_STEPS 和软限位双重限制。
+// ==== 调试页是否解除限位 ====
+// 1（默认）= **解除软限位和单次步数上限**，专门给标定用：
+//     标定阶段你必须能把机构往边上顶、去量真实行程，这时候软限位反而碍事。
+// 0 = 调试页也受软限位和单次上限约束（更安全，但标定时可能顶不到边）。
+//
+// ⚠️ 解除的是"业务软限位"（CFG_LIFT_MAX_MOVE_STEPS / CFG_STEPPER_*_RANGE_STEPS），
+//    **不解除**下面这些，它们和标定无关，只防手滑和防损坏：
+//      · StepperLib 的 CFG_STEPPER_MAX_STEPS（单次 run 的硬上限 8192 步）
+//      · 急停、动作互斥（一次只允许一个轴动）
+//      · 步数为 0 / 轴没接线 / 轴号非法 的参数校验
+//    STORE / TAKE 这些自动流程**始终**受软限位保护，不受这个开关影响。
+#ifndef CFG_DEBUG_IGNORE_LIMITS
+#define CFG_DEBUG_IGNORE_LIMITS 1
+#endif
+
 #ifndef CFG_DEBUG_JOG_SMALL
 #define CFG_DEBUG_JOG_SMALL 10
 #endif

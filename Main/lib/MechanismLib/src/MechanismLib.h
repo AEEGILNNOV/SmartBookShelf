@@ -83,7 +83,11 @@ public:
     // 点动。steps 是**带符号步数**（正 = 正方向，负 = 反方向）。
     //   allowInvert=false 时只接受"朝行程正方向"的点动（推书回退用这个）。
     //   被软限位/上限/其它轴占用拦下来时返回 false 并把 lastError 置上原因。
-    bool jog(uint8_t axis, int32_t steps, bool allowInvert);
+    // rawMode=true：**调试用**，跳过"软限位"和"单次步数上限"两道业务限制，
+    //   只保留"步数不为 0 / 轴在不在 / 硬上限 CFG_STEPPER_MAX_STEPS"这些参数校验。
+    //   为什么需要它：标定阶段必须能把机构往边上顶、去量真实行程，软限位会挡住这件事。
+    //   ⚠️ 只有调试页/手动调试走这条路；STORE / TAKE 自动流程始终用 rawMode=false。
+    bool jog(uint8_t axis, int32_t steps, bool allowInvert, bool rawMode = false);
 
     // 从当前位置走到指定的**绝对步数位置**（相对人工零点）。
     //   位置无效（没人工归零过）时直接拒绝：MECH_ERR_POS_INVALID。
@@ -146,7 +150,7 @@ public:
     void restorePosition(int32_t liftSteps);
 
     // 软限位：单次点动是否会被拦（调试页显示"能不能再走"）
-    bool jogAllowed(uint8_t axis, int32_t steps, bool allowInvert) const;
+    bool jogAllowed(uint8_t axis, int32_t steps, bool allowInvert, bool rawMode = false) const;
 
     // 串口打印当前机械状态（中文）
     void print();

@@ -93,7 +93,7 @@ int32_t MechanismLib::clampToRange(Stepper28BYJ *motor, int32_t steps) const {
 // -----------------------------------------------------------------------------
 // 请求：点动
 // -----------------------------------------------------------------------------
-bool MechanismLib::jog(uint8_t axis, int32_t steps, bool allowInvert) {
+bool MechanismLib::jog(uint8_t axis, int32_t steps, bool allowInvert, bool rawMode) {
     if (!_inited) {
         _lastError = MECH_ERR_NOT_INITED;
         snprintf(_lastErrorText, sizeof(_lastErrorText), "机械没初始化");
@@ -153,32 +153,48 @@ bool MechanismLib::jog(uint8_t axis, int32_t steps, bool allowInvert) {
         return false;
     }
 
-    // ④ 单次步数上限（比软限位更早拦住"参数多写一个 0"）
-    int32_t limit = (axis == MECH_AXIS_LIFT) ? CFG_LIFT_MAX_MOVE_STEPS
-                                             : CFG_PUSH_MAX_MOVE_STEPS;
-    int32_t mag = (signedSteps >= 0) ? signedSteps : -signedSteps;
-    if (mag > limit) {
-        _lastError = MECH_ERR_PARAM;
-        snprintf(_lastErrorText, sizeof(_lastErrorText), "%s 单次步数超上限 %ld",
-                 axisName, (long)limit);
-        Serial.printf("机械: 拒绝点动 —— %s 要 %ld 步, 超过单次上限 %ld\n",
-                      axisName, (long)mag, (long)limit);
-        return false;
-    }
+    // ④ 单次步数上限 / ⑤ 软限位：**这两道是业务保护，标定时要用 rawMode 跳过**。
+    //
+    // 为什么标定要跳过：标定本身就要"把机构往边上顶、量出真实行程"，
+    // 软限位会把它提前拦住，量不到真值。所以调试页默认走 rawMode。
+    int32_t clamped = signedSteps;
+    if (rawMode) {
+        // ---- 调试模式：只做"参数合法性"校验，不做业务限位 ----
+        int32_t mag = (signedSteps >= 0) ? signedSteps : -signedSteps;
+        if (mag > CFG_STEPPER_MAX_STEPS) {
+            // 硬上限还是要守：超过 StepperLib 单次能力的话 run() 会直接拒绝，
+            // 与其让它失败，不如夹到这个硬上限并明确告诉用户。
+            clamped = (signedSteps >= 0) ? CFG_STEPPER_MAX_STEPS : -CFG_STEPPER_MAX_STEPS;
+            Serial.printf("机械: [调试] %s 点动 %ld 步超过硬上限 %d, 已夹到 %ld 步\n",
+                          axisName, (long)mag, CFG_STEPPER_MAX_STEPS, (long)clamped);
+        }
+    } else {
+        // ---- 正常模式：单次上限 + 软限位双保险 ----
+        int32_t limit = (axis == MECH_AXIS_LIFT) ? CFG_LIFT_MAX_MOVE_STEPS
+                                                 : CFG_PUSH_MAX_MOVE_STEPS;
+        int32_t mag = (signedSteps >= 0) ? signedSteps : -signedSteps;
+        if (mag > limit) {
+            _lastError = MECH_ERR_PARAM;
+            snprintf(_lastErrorText, sizeof(_lastErrorText), "%s 单次步数超上限 %ld",
+                     axisName, (long)limit);
+            Serial.printf("机械: 拒绝点动 —— %s 要 %ld 步, 超过单次上限 %ld\n",
+                          axisName, (long)mag, (long)limit);
+            return false;
+        }
 
-    // ⑤ 软限位：夹到边界；夹完是 0 就说明已经在边上了
-    int32_t clamped = clampToRange(motor, signedSteps);
-    if (clamped == 0) {
-        _lastError = MECH_ERR_PARAM;
-        snprintf(_lastErrorText, sizeof(_lastErrorText), "%s 已到软限位", axisName);
-        Serial.printf("机械: 拒绝点动 —— %s 已经到软限位(±%ld 步)\n", axisName,
-                      (long)motor->rangeSteps());
-        return false;
-    }
-    if (clamped != signedSteps) {
-        // 夹短了要告诉用户：否则用户以为走了 500 步，实际只走了 80 步
-        Serial.printf("机械: %s 点动 %ld 步被软限位夹到 %ld 步\n", axisName,
-                      (long)signedSteps, (long)clamped);
+        clamped = clampToRange(motor, signedSteps);
+        if (clamped == 0) {
+            _lastError = MECH_ERR_PARAM;
+            snprintf(_lastErrorText, sizeof(_lastErrorText), "%s 已到软限位", axisName);
+            Serial.printf("机械: 拒绝点动 —— %s 已经到软限位(±%ld 步)\n", axisName,
+                          (long)motor->rangeSteps());
+            return false;
+        }
+        if (clamped != signedSteps) {
+            // 夹短了要告诉用户：否则用户以为走了 500 步，实际只走了 80 步
+            Serial.printf("机械: %s 点动 %ld 步被软限位夹到 %ld 步\n", axisName,
+                          (long)signedSteps, (long)clamped);
+        }
     }
 
     // ⑥ 真正登记走步。这里只登记，脉冲在 service() 里发。
@@ -200,9 +216,9 @@ bool MechanismLib::jog(uint8_t axis, int32_t steps, bool allowInvert) {
     }
     _moveCount++;
 
-    Serial.printf("机械: %s 点动 %ld 步 (方向符号=%ld, 当前位置=%ld)\n",
-                  axisName, (long)clamped, (long)dirSign,
-                  (long)motor->position());
+    Serial.printf("机械: %s 点动 %ld 步 (方向符号=%ld, 当前位置=%ld, 模式=%s)\n",
+                  axisName, (long)clamped, (long)dirSign, (long)motor->position(),
+                  rawMode ? "调试-不限位" : "正常-带软限位");
     return true;
 }
 
@@ -599,7 +615,7 @@ int32_t MechanismLib::moveCount() const {
     return (int32_t)_moveCount;
 }
 
-bool MechanismLib::jogAllowed(uint8_t axis, int32_t steps, bool allowInvert) const {
+bool MechanismLib::jogAllowed(uint8_t axis, int32_t steps, bool allowInvert, bool rawMode) const {
     // 只做"能不能走"的预判，不改变任何状态（调试页用它把按钮置灰）
     if (!_inited || _state == MECH_MOVING || steps == 0) {
         return false;
@@ -623,6 +639,12 @@ bool MechanismLib::jogAllowed(uint8_t axis, int32_t steps, bool allowInvert) con
     }
     if (axis == MECH_AXIS_PUSH && !allowInvert && (steps < 0)) {
         return false;
+    }
+
+    if (rawMode) {
+        // 调试模式：软限位和单次上限都不管，只确认参数合法（非 0、没超硬上限）
+        int32_t mag = (steps >= 0) ? steps : -steps;
+        return (mag > 0) && (mag <= CFG_STEPPER_MAX_STEPS);
     }
 
     int32_t signedSteps = (dirSign >= 0) ? steps : -steps;

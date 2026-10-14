@@ -94,6 +94,9 @@ static QueueHandle_t MotorQueue = nullptr;
 struct MechRequest {
     uint8_t cmd;      // MechCmd
     int32_t arg;      // 步数 / 书单下标 / 分类 ID，按 cmd 解释
+    // 1 = 这是"调试动作"：跳过软限位和单次步数上限（标定要用，见 CFG_DEBUG_IGNORE_LIMITS）
+    // 存书/取书这些自动流程永远是 0，始终受软限位保护。
+    uint8_t raw;
 };
 static QueueHandle_t MechQueue = nullptr;
 
@@ -211,7 +214,7 @@ static void cmdBookFlow(const char *arg);
 static void cmdBooksDiag(const char *arg);
 
 static Stepper28BYJ *getMotor(int index);
-static bool postMechRequest(uint8_t cmd, int32_t arg);
+static bool postMechRequest(uint8_t cmd, int32_t arg, uint8_t raw = 0);
 static void handleDebugCmd(uint8_t cmd, int16_t arg);
 static void handleDebugButton(uint8_t index, bool longPress);
 static const char *pageName(uint8_t page);
@@ -251,7 +254,7 @@ static Stepper28BYJ *getMotor(int index) {
 }
 
 // 往机械请求队列投一条请求。队列满就返回 false 并打日志（绝不阻塞等待）。
-static bool postMechRequest(uint8_t cmd, int32_t arg) {
+static bool postMechRequest(uint8_t cmd, int32_t arg, uint8_t raw) {
     if (MechQueue == nullptr) {
         Serial.println("机械: 请求队列没建好");
         return false;
@@ -259,6 +262,7 @@ static bool postMechRequest(uint8_t cmd, int32_t arg) {
     MechRequest req;
     req.cmd = cmd;
     req.arg = arg;
+    req.raw = raw;
     if (xQueueSend(MechQueue, &req, pdMS_TO_TICKS(20)) != pdPASS) {
         Serial.println("机械: 请求队列满, 请稍后再试");
         return false;
@@ -681,16 +685,16 @@ static void cmdDebug(const char *arg) {
     } else if (strcmp(sub, "save") == 0) {
         postMechRequest(MECH_REQ_SAVE_NOW, 0);
     } else if (strcmp(sub, "up") == 0) {
-        postMechRequest(MECH_REQ_JOG_LIFT, (int32_t)jog);
+        postMechRequest(MECH_REQ_JOG_LIFT, (int32_t)jog, CFG_DEBUG_IGNORE_LIMITS);
         Serial.printf("调试: 升降上移点动 %u 步\n", (unsigned)jog);
     } else if (strcmp(sub, "down") == 0) {
-        postMechRequest(MECH_REQ_JOG_LIFT, -(int32_t)jog);
+        postMechRequest(MECH_REQ_JOG_LIFT, -(int32_t)jog, CFG_DEBUG_IGNORE_LIMITS);
         Serial.printf("调试: 升降下移点动 %u 步\n", (unsigned)jog);
     } else if (strcmp(sub, "out") == 0) {
-        postMechRequest(MECH_REQ_JOG_PUSH, (int32_t)jog);
+        postMechRequest(MECH_REQ_JOG_PUSH, (int32_t)jog, CFG_DEBUG_IGNORE_LIMITS);
         Serial.printf("调试: 推书前进点动 %u 步\n", (unsigned)jog);
     } else if (strcmp(sub, "back") == 0) {
-        postMechRequest(MECH_REQ_JOG_PUSH, -(int32_t)jog);
+        postMechRequest(MECH_REQ_JOG_PUSH, -(int32_t)jog, CFG_DEBUG_IGNORE_LIMITS);
         Serial.printf("调试: 推书后退点动 %u 步（机械允许才用）\n", (unsigned)jog);
     } else if (strcmp(sub, "stop") == 0) {
         cmdStopMotor(nullptr);
@@ -1176,7 +1180,8 @@ static void stepperTask(void *pvParameters) {
                     if (flowState != FLOW_IDLE) {
                         Serial.println("机械: 拒绝点动 —— 存书/取书流程正在进行");
                         snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", "流程进行中，暂不接受点动");
-                    } else if (!mechanism.jog(MECH_AXIS_LIFT, req.arg, true)) {
+                    } else if (!mechanism.jog(MECH_AXIS_LIFT, req.arg, true,
+                                              req.raw != 0)) {
                         Serial.printf("机械: 升降点动被拒绝 —— %s\n",
                                       mechanism.lastErrorText());
                         snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", mechanism.lastErrorText());
@@ -1187,7 +1192,8 @@ static void stepperTask(void *pvParameters) {
                     if (flowState != FLOW_IDLE) {
                         Serial.println("机械: 拒绝点动 —— 存书/取书流程正在进行");
                         snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", "流程进行中，暂不接受点动");
-                    } else if (!mechanism.jog(MECH_AXIS_PUSH, req.arg, true)) {
+                    } else if (!mechanism.jog(MECH_AXIS_PUSH, req.arg, true,
+                                              req.raw != 0)) {
                         Serial.printf("机械: 推书点动被拒绝 —— %s\n",
                                       mechanism.lastErrorText());
                         snprintf(lastStoreNote, sizeof(lastStoreNote), "%s", mechanism.lastErrorText());
@@ -1725,12 +1731,12 @@ static void handleDebugButton(uint8_t index, bool longPress) {
             break;
 
         case 4:
-            postMechRequest(MECH_REQ_JOG_LIFT, (int32_t)jogSteps);
+            postMechRequest(MECH_REQ_JOG_LIFT, (int32_t)jogSteps, CFG_DEBUG_IGNORE_LIMITS);
             Serial.printf("调试页按键4: 升降点动 %u 步\n", (unsigned)jogSteps);
             break;
 
         case 5:
-            postMechRequest(MECH_REQ_JOG_PUSH, (int32_t)jogSteps);
+            postMechRequest(MECH_REQ_JOG_PUSH, (int32_t)jogSteps, CFG_DEBUG_IGNORE_LIMITS);
             Serial.printf("调试页按键5: 推书点动 %u 步\n", (unsigned)jogSteps);
             break;
 
@@ -2337,17 +2343,20 @@ static void handleDebugCmd(uint8_t cmd, int16_t arg) {
     }
 
     switch (cmd) {
+        // 调试页的点动一律用 raw=1：解除软限位和单次上限（CFG_DEBUG_IGNORE_LIMITS）
+        // 标定必须能把机构往边上顶去量真实行程，软限位在这里只会碍事。
+        // 急停、互斥、参数校验、步数硬上限这些都还在。
         case DEBUG_CMD_LIFT_UP:
-            postMechRequest(MECH_REQ_JOG_LIFT, (int32_t)jog);
+            postMechRequest(MECH_REQ_JOG_LIFT, (int32_t)jog, CFG_DEBUG_IGNORE_LIMITS);
             break;
         case DEBUG_CMD_LIFT_DOWN:
-            postMechRequest(MECH_REQ_JOG_LIFT, -(int32_t)jog);
+            postMechRequest(MECH_REQ_JOG_LIFT, -(int32_t)jog, CFG_DEBUG_IGNORE_LIMITS);
             break;
         case DEBUG_CMD_PUSH_FORWARD:
-            postMechRequest(MECH_REQ_JOG_PUSH, (int32_t)jog);
+            postMechRequest(MECH_REQ_JOG_PUSH, (int32_t)jog, CFG_DEBUG_IGNORE_LIMITS);
             break;
         case DEBUG_CMD_PUSH_BACK:
-            postMechRequest(MECH_REQ_JOG_PUSH, -(int32_t)jog);
+            postMechRequest(MECH_REQ_JOG_PUSH, -(int32_t)jog, CFG_DEBUG_IGNORE_LIMITS);
             break;
         case DEBUG_CMD_STOP_ALL:
             postMechRequest(MECH_REQ_STOP_ALL, 0);
