@@ -2285,7 +2285,8 @@ static void recogTask(void *pvParameters) {
                                      "已投出存书请求 %s(ID=%d)，等 stepperTask 处理",
                                      getBookNameById(id), (int)id);
                             if (postMechRequest(MECH_REQ_STORE_BOOK, (int32_t)id)) {
-                                display.setPage(PAGE_DEBUG);   // 跳到调试页让用户看流程
+                                // ⚠️ 原来这里会**自动跳到调试页**；用户要求"自动弹出测试界面的功能全删"，
+                                //    所以现在只打串口、不切页面（想看流程敲 g 进调试页，或敲 j 看诊断）。
                             } else {
                                 // 队列满：清掉"处理过"的标记，下一帧还能重试，
                                 // 否则这个 ID 就永远不再请求了，看起来就是"识别到但进不了数组"

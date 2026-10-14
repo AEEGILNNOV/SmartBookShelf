@@ -542,6 +542,14 @@
 #define CFG_ENABLE_NOTIFY_POPUP 0
 #endif
 
+// ==== 状态页/书列表页右下角的"调试"入口按钮 ====
+//   0 = **不建这个按钮**（用户要求"把调控按钮删去"，当前就是这一档）；
+//       调试页仍然可以用串口命令 g 进入，业务功能不受影响。
+//   1 = 恢复屏幕右下角那个"调试"按钮。
+#ifndef CFG_ENABLE_DEBUG_ENTRY_BUTTON
+#define CFG_ENABLE_DEBUG_ENTRY_BUTTON 0
+#endif
+
 // 消息文字缓冲（UTF-8 一个汉字 3 字节，96 字节能放一条整句）
 #ifndef CFG_MESSAGE_LEN
 #define CFG_MESSAGE_LEN 96

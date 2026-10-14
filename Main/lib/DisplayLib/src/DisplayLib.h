@@ -39,6 +39,12 @@
 #define PAGE_DEBUG   0x05   // 电机/机械调试页（点动/急停/归零/保存/清空书单）
 #define PAGE_COUNT   6      // 页面总数：翻页取模、setPage() 上界、标题栏 n/N 都看它
 
+// 右下角"调试"入口按钮的开关（0 = 不建）。config.h 里已经定义了，这里只是兜底，
+// 保证 DisplayLib 单独编译（不挂 config.h）时也能编过。
+#ifndef CFG_ENABLE_DEBUG_ENTRY_BUTTON
+#define CFG_ENABLE_DEBUG_ENTRY_BUTTON 0
+#endif
+
 // 屏幕分辨率：从 TFT_eSPI 的宏推导（本头文件已在上面 include 过 <TFT_eSPI.h>）。
 // 业务代码算坐标一律用 SCR_W/SCR_H，不要写死 240/320。
 // MAX_BOOK_RECORDS、字体宏、队列与任务参数都在 include/config.h 里，改配置请改那个文件。

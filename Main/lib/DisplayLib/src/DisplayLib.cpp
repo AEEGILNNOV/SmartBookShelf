@@ -136,7 +136,8 @@ static DisplayLib *s_self = nullptr;
 #define DEBUG_BTN_BOTTOM (CFG_TOUCH_BOTTOM_MASK_PX + 4)
 // 书列表页的滚动容器要主动给"调试"入口让出的高度（按钮 24 + 6 间距），
 // 不然入口会压在最后几行的"取出"按钮上面，那边就点不着了。
-#define DEBUG_BTN_RESERVE (DEBUG_BTN_H + 6)
+#define DEBUG_BTN_RESERVE (CFG_ENABLE_DEBUG_ENTRY_BUTTON ? (DEBUG_BTN_H + 6) : 0)
+//   ⚠️ 上面必须写成条件表达式、不能写死："调试"入口按钮删掉之后，书列表就不用再让位了，
 // 清空书单的二次确认时限(ms)：超时自动收回，免得"上膛"以后被下一次误点清库
 #define DEBUG_CLEAR_CONFIRM_MS 3000
 
@@ -416,7 +417,9 @@ static void onBtnTakeOut(lv_event_t *e) {
 // ⚠️ 这些控件和别的页面一样，只在 displayTask 里碰（LVGL 不是线程安全的）
 static lv_obj_t *s_debugPanel = nullptr;    // 调试页的竖直滚动容器（只能上下滑）
 static lv_obj_t *s_debugText = nullptr;     // 调试页正文（中文多行，跟着容器一起滚）
+#if CFG_ENABLE_DEBUG_ENTRY_BUTTON
 static lv_obj_t *s_btnDebugEnter = nullptr; // 状态页/书列表页右下角的"调试"入口
+#endif
 static lv_obj_t *s_btnClearBooks = nullptr; // "清空书籍"按钮（要二次确认，文字会变）
 static lv_obj_t *s_jogBtn[3] = {nullptr, nullptr, nullptr};  // 小/中/大 三个步长按钮
 
@@ -612,6 +615,9 @@ static void onBtnDebugBack(lv_event_t *e) {
 }
 
 // 状态页/书列表页右下角"调试"入口
+// ⚠️ 用户要求"把调控按钮删去"（CFG_ENABLE_DEBUG_ENTRY_BUTTON = 0），所以整块不编译；
+//    调试页仍然可以用串口命令 g 进入。
+#if CFG_ENABLE_DEBUG_ENTRY_BUTTON
 static void onBtnEnterDebug(lv_event_t *e) {
     (void)e;
     if (s_self != nullptr) {
@@ -619,6 +625,7 @@ static void onBtnEnterDebug(lv_event_t *e) {
         Serial.println("调试: 进入电机调试页(第 6 页)");
     }
 }
+#endif
 
 // =============================================================================
 // 构造
@@ -639,7 +646,9 @@ DisplayLib::DisplayLib() {
 
     _mutex = nullptr;
     _taskHandle = nullptr;
-    _page = PAGE_STATUS;
+    // ⚠️ 用户要求：开机第一面就是**书列表页（取书页）**，不再先显示状态页。
+    //    其它页面照旧用"下一页"按钮翻；状态页仍然存在，只是不再是开机默认页。
+    _page = PAGE_BOOKS;
     _dirty = true;
     memset(_message, 0, sizeof(_message));
     _messageUntil = 0;
@@ -1724,8 +1733,10 @@ void DisplayLib::update() {
     objSetHidden(s_bookPanel, page != PAGE_BOOKS);
     objSetHidden(s_labelBody, page == PAGE_BOOKS || page == PAGE_DEBUG);
 
+#if CFG_ENABLE_DEBUG_ENTRY_BUTTON
     // "调试"入口只在状态页/书列表页出现：其它页有自己的面板和按钮，别来抢触摸
     objSetHidden(s_btnDebugEnter, !(page == PAGE_STATUS || page == PAGE_BOOKS));
+#endif
 
     switch (page) {
         case PAGE_SYSINFO:
@@ -2383,7 +2394,8 @@ void DisplayLib::createDebugUi() {
     lv_obj_add_event_cb(s_btnClearBooks, onBtnDebugClearBooks, LV_EVENT_CLICKED, nullptr);
     lv_obj_add_event_cb(btnBack, onBtnDebugBack, LV_EVENT_CLICKED, nullptr);
 
-    // ---- 状态页/书列表页右下角的"调试"入口 ----
+    // ---- 状态页/书列表页右下角的"调试"入口（用户要求删去，默认不建）----
+#if CFG_ENABLE_DEBUG_ENTRY_BUTTON
     // 位置固定：底边躲开最下方那段不响应触摸的屏蔽区；书列表容器也已经让出了这段高度，
     // 所以它不会压住每行右边的"取出"按钮。只在状态页/书列表页显示（update() 里控制）。
     s_btnDebugEnter = lv_btn_create(lv_scr_act());
@@ -2400,12 +2412,17 @@ void DisplayLib::createDebugUi() {
     lv_obj_center(enterLabel);
     lv_obj_clear_flag(enterLabel, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(s_btnDebugEnter, onBtnEnterDebug, LV_EVENT_CLICKED, nullptr);
-
-    // 两个入口都默认藏起来，update() 里按当前页决定显示谁
-    objSetHidden(s_debugPanel, true);
     objSetHidden(s_btnDebugEnter, true);
+#endif
 
+    // 调试页面板默认藏起来，update() 里按当前页决定显示
+    objSetHidden(s_debugPanel, true);
+
+#if CFG_ENABLE_DEBUG_ENTRY_BUTTON
     Serial.println("调试: 调试页(第 6 页)已建好, 入口在状态页/书列表页右下角");
+#else
+    Serial.println("调试: 调试页(第 6 页)已建好, 屏幕入口已按需求关闭(串口 g 可进)");
+#endif
 }
 
 // =============================================================================
