@@ -149,6 +149,11 @@ static const char *recogModeText = "?";     // 最近一次读帧时的算法名
 static int16_t recogModeIdx = -1;           // 最近一次读帧时的算法下标
 static char recogNote[CFG_BOOK_NOTE_LEN] = "";  // 最后一次判定结果（中文）
 
+// 二哈"读到第几帧"的序号：每次成功读到一帧就 +1。
+// 取书流程回退后靠它判断"这次读到的到底是不是一帧新的识别结果"
+// （跨任务读一个 32 位计数，最坏读到上一拍，不影响正确性）。
+static volatile uint32_t recogFrameSeq = 0;
+
 // 上一次识别/入库的结果提示（给界面显示，说明"为什么没入库"）
 static char lastStoreNote[CFG_BOOK_NOTE_LEN] = "";
 
@@ -799,7 +804,10 @@ static void cmdDebug(const char *arg) {
 #define FLOW_STORE_MOVE_DOWN   7   // 存完一本后：整叠书向下让 125 步，保持投书位置不变
 #define FLOW_TAKE_LIFT         4   // 升降把目标书对准出书口
 #define FLOW_TAKE_PUSH         5   // 推书推出
-#define FLOW_TAKE_RETRACT      6   // 推书回退（可选）
+#define FLOW_TAKE_RETRACT      6   // 推书回退
+#define FLOW_TAKE_HOLD         8   // 推出后停 CFG_PUSH_HOLD_MS（等书被接走/机械停稳）
+#define FLOW_TAKE_VERIFY_WAIT  9   // 回退后再等 CFG_TAKE_VERIFY_DELAY_MS，然后读二哈校验
+#define FLOW_TAKE_HOME        10   // 最后把升降送回"标准位"(-125 x 剩余书数)
 
 static uint8_t flowState = FLOW_IDLE;
 static bool flowStartRequested = false;   // 有没有新的存书/取书请求
@@ -836,6 +844,11 @@ static uint32_t flowDeadlineMs = 0;       // 流程级超时
 static uint32_t flowWaitStartMs = 0;      // 开始"等放书确认"的时刻（给界面算倒计时）
 static bool flowDownStarted = false;      // 存书后"向下让一本书"是否已经发过请求
 
+// ---- 取书流程新增的三个小状态量 ----
+static uint32_t flowHoldDeadlineMs = 0;   // "推出后停住" / "回退后再等一拍" 的到期时刻
+static uint32_t flowVerifyStartSeq = 0;   // 开始等二哈新帧时的 recogFrameSeq（用来判断有没有新帧）
+static bool flowHomeStarted = false;      // 取书最后"回标准位"是否已经发过请求
+
 // 把"目标书的升降位置"算出来
 //
 // 【位置模型（本次改造的核心约定，一定要看懂这段）】
@@ -846,20 +859,42 @@ static bool flowDownStarted = false;      // 存书后"向下让一本书"是否
 //
 // ⚠️ 如果以后机械改成"进书口和出书口不是同一个位置"，不要去改公式本体，
 //    把两者的高度差填到 CFG_LIFT_INDEX0_OFFSET_STEPS 里即可（那个宏就是为这种情况留的）。
-//   书堆数组下标 0 = 书堆**最顶部**（新书从顶部放入，所以最新的在最上面）。
-//   人工归零时，把"要存书/最顶那本书对准出书口"的那个位置定为软件零点。
+//   【坐标系（用户实机确认过，改公式前一定要看懂）】
+//     · 零点(0) = 空平台：平台面正好在推出口的高度，**最下面那本书**可以被推出来。
+//     · 放一本 -> 平台下降 125 步（-125）；放 n 本 -> 停在 -n × 每本书步数，
+//       这就是"标准位"：书堆顶面正对投书口，下一本能从同一个口放进来。
+//     · 由此得出：**从最下面数第 j 本**（j = 0,1,2...）能被推出时，平台位置 = -j × 每本书步数。
+//     · 数组是"顶 -> 底"，下标 0 = 最上面（最新放的那本），
+//       所以下标 i 对应从下面数 j = (总数 - 1 - i)。
 //   于是：
-//     目标位置(相对零点) = CFG_LIFT_INDEX0_OFFSET_STEPS + 下标 × CFG_LIFT_STEPS_PER_BOOK
-//     （CFG_LIFT_INDEX0_OFFSET_STEPS 默认 0：因为投书口 == 取书口，两者没有高度差）
-//   ⚠️ CFG_LIFT_STEPS_PER_BOOK 必须是**实机标定**出来的（见 config.h 9.1 节），
-//      现在是保守初值 200 步，没标定之前不要跑自动取书。
+//     目标位置 = CFG_LIFT_INDEX0_OFFSET_STEPS - (总数 - 1 - 下标) × 每本书步数
+//   ⚠️ 以前这里写的是 `下标 × 每本书步数`（正值），**方向是反的**：
+//      只有"下标 0 且书堆只有 1 本"时碰巧对，取下面几本会往反方向走。
+//      例：3 本、标准位 -375 时，取下标0 -> -250、下标1 -> -125、下标2 -> 0。
+//   ⚠️ CFG_LIFT_STEPS_PER_BOOK 必须是**实机标定**出来的（见 config.h 9.1 节）。
 //   ⚠️ 开环系统：这个公式算的是"软件以为的位置"，堵转/丢步/齿轮间隙都会让它偏。
-static int32_t calcLiftTargetForIndex(int16_t index) {
+static int32_t calcLiftTargetForIndex(int16_t index, int16_t total) {
     if (index < 0) {
         index = 0;
     }
-    return CFG_LIFT_INDEX0_OFFSET_STEPS +
-           (int32_t)index * (int32_t)CFG_LIFT_STEPS_PER_BOOK;
+    if (total < 1) {
+        total = 1;
+    }
+    if (index >= total) {
+        index = (int16_t)(total - 1);
+    }
+    int32_t j = (int32_t)(total - 1 - index);   // 从最下面数第几本（0 = 最下面那本）
+    return CFG_LIFT_INDEX0_OFFSET_STEPS - j * (int32_t)CFG_LIFT_STEPS_PER_BOOK;
+}
+
+// 取书最后要停的"标准位"：书堆顶面正对投书口，新书能从同一个口顺利投入。
+// ⚠️ 书数 = **取完之后剩下**的数量（所以流程里要先删记录、再调它）。
+static int32_t calcLiftStandardPos(int16_t bookCount) {
+    if (bookCount < 0) {
+        bookCount = 0;
+    }
+    return CFG_LIFT_INDEX0_OFFSET_STEPS -
+           (int32_t)bookCount * (int32_t)CFG_LIFT_STEPS_PER_BOOK;
 }
 
 // 存书前检查：ID 合法 + 没重复 + 位置有效，全部通过返回 BOOK_OK
@@ -1073,6 +1108,59 @@ static void flowFinishTake() {
     flowState = FLOW_IDLE;
 }
 
+// 取书校验：回退完成后，二哈（固定在书堆正上方）应该能认出"现在最顶上那本"。
+//   · 取下标 i>0（中间/最下面）时：最上面那本没动 -> 期望 = 数组下标 0；
+//   · 取下标 0（最上面）时      ：新的最上面是原来的下标 1。
+//   ⚠️ 此刻记录还没删，所以数组内容和"物理上现在最顶上那本"差一位。
+//   ⚠️ 只提示、**绝不阻断取书**：二哈离线或不在分类算法(a,2/a,3)下都会不合格，
+//      绝不能因为它把整条取书流程卡住（用户已确认这一点）。
+static void takeVerifyNextBook() {
+    int16_t expectIdx = (flowTakeIndex == 0) ? 1 : 0;
+    BookItem expect;
+    memset(&expect, 0, sizeof(expect));
+    bool haveExpect = g_books.at(expectIdx, &expect);
+
+    if (!haveExpect) {
+        Serial.println("取书校验: 书堆已经空了，没有下一本可以对照（跳过）");
+        return;
+    }
+    if (recogFrameSeq == flowVerifyStartSeq) {
+        Serial.println("取书校验: ⚠️ 二哈没有给出新的一帧（很可能离线）—— 跳过校验");
+        Serial.printf("          期望看到 %s(ID=%d)，但没读到新帧\n",
+                      getBookNameById(expect.id), (int)expect.id);
+        notify("取书完成，但二哈未回数据(未校验)", CFG_MESSAGE_HOLD_MS);
+        return;
+    }
+    if (recogLastId == expect.id) {
+        Serial.printf("取书校验: ✅ 二哈看到 %s(ID=%d)，和期望一致\n",
+                      getBookNameById(expect.id), (int)expect.id);
+        notify("取书校验通过", CFG_MESSAGE_HOLD_MS);
+    } else {
+        Serial.printf("取书校验: ⚠️ 二哈看到 ID=%d(%s)，期望 ID=%d(%s) —— 请人工确认\n",
+                      (int)recogLastId, getBookNameById(recogLastId),
+                      (int)expect.id, getBookNameById(expect.id));
+        Serial.printf("          （当前算法=%s；OCR 模式下 ID 不可信）\n", recogModeText);
+        notify("取书完成，但校验不一致，请看串口", CFG_MESSAGE_HOLD_MS);
+    }
+}
+
+// 推书回退到位之后（或配置成不回退时）的统一去处：
+//   要校验就先等一拍再读二哈；不校验就直接收尾 + 回标准位。
+static void takeAfterRetract() {
+#if CFG_TAKE_VERIFY_ENABLE
+    // 二哈 1 秒一帧：回退后立刻读会读到"推出之前"的旧帧，所以先等一段再读
+    flowVerifyStartSeq = recogFrameSeq;
+    flowHoldDeadlineMs = millis() + (uint32_t)CFG_TAKE_VERIFY_DELAY_MS;
+    flowState = FLOW_TAKE_VERIFY_WAIT;
+    Serial.printf("取书: 等 %d ms 后读二哈校验\n", (int)CFG_TAKE_VERIFY_DELAY_MS);
+#else
+    Serial.println("取书: CFG_TAKE_VERIFY_ENABLE=0, 不读二哈");
+    flowFinishTake();
+    flowState = FLOW_TAKE_HOME;
+    flowHomeStarted = false;
+#endif
+}
+
 // 取书流程推进（每轮调一次，不阻塞）
 static void flowStepTake() {
     switch (flowState) {
@@ -1127,10 +1215,21 @@ static void flowStepTake() {
             //    软件能确认的只有"推书电机走完了预设步数"，
             //    **不能证明实体书一定完全推出了**。这一步按需求"默认认为推出完成"。
             Serial.println("取书: 推书动作正常结束(预设步数走完)");
+            Serial.printf("      推到接书位置, 停 %d ms 再收回推书板\n",
+                          (int)CFG_PUSH_HOLD_MS);
+            flowHoldDeadlineMs = millis() + (uint32_t)CFG_PUSH_HOLD_MS;
+            flowState = FLOW_TAKE_HOLD;
+            break;
+        }
 
+        // ---- 推出后停住 CFG_PUSH_HOLD_MS ----
+        // ⚠️ 非阻塞：只看 deadline，绝不 delay（delay 会卡死整个 stepperTask，连急停都按不动）
+        case FLOW_TAKE_HOLD: {
+            if ((int32_t)(millis() - flowHoldDeadlineMs) < 0) {
+                break;   // 还没停够
+            }
 #if CFG_PUSH_AUTO_RETRACT
-            // 机械允许时先回退再删记录：回退失败也算取书失败，记录保留
-            Serial.println("取书: 推书回退中...");
+            Serial.printf("取书: 收回推书板 %d 步\n", (int)CFG_PUSH_RETRACT_STEPS);
             storage.markActionPending();
             if (!mechanism.movePushBack()) {
                 Serial.printf("取书: ❌ 推书回退下发失败 —— %s\n",
@@ -1142,13 +1241,12 @@ static void flowStepTake() {
             }
             flowState = FLOW_TAKE_RETRACT;
 #else
-            // 默认不回退（CFG_PUSH_AUTO_RETRACT=0）：推书板停在前面，由用户把书拿走
-            flowFinishTake();
+            Serial.println("取书: CFG_PUSH_AUTO_RETRACT=0，不回退推书板");
+            takeAfterRetract();
 #endif
             break;
         }
 
-#if CFG_PUSH_AUTO_RETRACT
         case FLOW_TAKE_RETRACT: {
             MechResult res;
             if (!mechanism.takeResult(res)) {
@@ -1162,10 +1260,62 @@ static void flowStepTake() {
                 return;
             }
             storage.clearActionPending();
-            flowFinishTake();
+            Serial.println("取书: 推书板已收回");
+            takeAfterRetract();
             break;
         }
-#endif
+
+        // ---- 回退完成后等一拍，再读二哈校验"下一本是不是它" ----
+        case FLOW_TAKE_VERIFY_WAIT: {
+            if ((int32_t)(millis() - flowHoldDeadlineMs) < 0) {
+                break;   // 还没等到
+            }
+            takeVerifyNextBook();   // 只提示、不阻断
+            flowFinishTake();       // 机械动作都成功了 -> 这时才删记录 + 落盘
+            flowState = FLOW_TAKE_HOME;
+            flowHomeStarted = false;
+            break;
+        }
+
+        // ---- 最后把升降送回"标准位"：书堆顶面正对投书口，新书能从同一个口投进来 ----
+        case FLOW_TAKE_HOME: {
+            if (!flowHomeStarted) {
+                // ⚠️ 用"取完之后剩下的书数"：记录已经在进入本状态前删掉了
+                int16_t left = display.bookCount();
+                int32_t target = calcLiftStandardPos(left);
+                flowHomeStarted = true;
+                Serial.printf("取书: 升降回标准位 (剩 %d 本 -> %ld 步, 当前 %ld 步)\n",
+                              (int)left, (long)target, (long)mechanism.liftSteps());
+                storage.markActionPending();
+                if (!mechanism.moveLiftTo(target)) {
+                    Serial.printf("取书: ⚠️ 回标准位下发失败 —— %s（记录已经更新好了）\n",
+                                  mechanism.lastErrorText());
+                    storage.clearActionPending();
+                    notify("取书完成，但升降没回到标准位", CFG_MESSAGE_HOLD_MS);
+                    flowState = FLOW_IDLE;
+                    break;
+                }
+                break;   // 等它走完，下一轮再看
+            }
+            MechResult res;
+            if (!mechanism.takeResult(res)) {
+                break;   // 还在走
+            }
+            if (!res.ok) {
+                Serial.printf("取书: ⚠️ 回标准位没有正常完成 —— %s\n",
+                              mechanism.lastErrorText());
+                notify("取书完成，但升降没回到标准位，请检查", CFG_MESSAGE_HOLD_MS);
+                storage.clearActionPending();
+                flowState = FLOW_IDLE;
+                break;
+            }
+            storage.clearActionPending();
+            saveAllToFlash("取书后回标准位");
+            Serial.printf("取书: ✅ 全部完成, 升降停在标准位 %ld 步\n",
+                          (long)mechanism.liftSteps());
+            flowState = FLOW_IDLE;
+            break;
+        }
 
         default:
             flowState = FLOW_IDLE;
@@ -1402,9 +1552,14 @@ static void stepperTask(void *pvParameters) {
                     memset(&item, 0, sizeof(item));
                     g_books.at(idx, &item);
 
-                    int32_t target = calcLiftTargetForIndex(idx);
-                    Serial.printf("取书: 请求《%s》(下标 %d), 升降目标 = %ld 步\n",
-                                  getBookNameById(item.id), (int)idx, (long)target);
+                    // 目标 = -(总数-1-下标) x 每本书步数；见 calcLiftTargetForIndex 的坐标系说明
+                    int32_t target = calcLiftTargetForIndex(idx, total);
+                    Serial.printf("取书: 请求《%s》(下标 %d, 共 %d 本, 从最下面数第 %d 本)\n",
+                                  getBookNameById(item.id), (int)idx, (int)total - 1,
+                                  (int)(total - 1 - idx));
+                    Serial.printf("      升降目标 = %ld 步, 当前 = %ld 步, 需要走 %ld 步\n",
+                                  (long)target, (long)mechanism.liftSteps(),
+                                  (long)(target - mechanism.liftSteps()));
 
                     storage.markActionPending();   // 动作前先记"未完成"
                     if (!mechanism.moveLiftTo(target)) {
@@ -1425,7 +1580,8 @@ static void stepperTask(void *pvParameters) {
             flowState == FLOW_STORE_MOVE_DOWN) {
             flowStepStore();
         } else if (flowState == FLOW_TAKE_LIFT || flowState == FLOW_TAKE_PUSH ||
-                   flowState == FLOW_TAKE_RETRACT) {
+                   flowState == FLOW_TAKE_RETRACT || flowState == FLOW_TAKE_HOLD ||
+                   flowState == FLOW_TAKE_VERIFY_WAIT || flowState == FLOW_TAKE_HOME) {
             flowStepTake();
         }
 
@@ -1994,6 +2150,9 @@ static void recogTask(void *pvParameters) {
 
             int16_t ret = husky.readFrame(frame);
             display.setFrame(frame);  // 显示库自己判断内容变没变
+            if (ret >= 0) {
+                recogFrameSeq++;   // 取书校验靠它判断"这是不是一帧新的识别结果"
+            }
 
             if (ret < 0) {
                 // 通信超时：累计出错就判掉线，交给上面重连
@@ -2440,7 +2599,8 @@ static void cmdTouch(const char *arg) {
 // 真正执行的是 stepperTask，那里才有软限位/互斥/急停的全套保护。
 // =============================================================================
 static void handleDebugCmd(uint8_t cmd, int16_t arg) {
-    (void)arg;   // 调试页用不到参数（步长从 debugJogSteps() 读）
+    // 调试页的点动用不到 arg（步长从 debugJogSteps() 读）；
+    // 书列表页的"取出"按钮要用 arg = 书籍下标，所以这里不能 (void)arg。
 
     uint16_t jog = debugJogSteps();
     if (jog == 0) {
@@ -2475,6 +2635,12 @@ static void handleDebugCmd(uint8_t cmd, int16_t arg) {
         case DEBUG_CMD_CLEAR_BOOKS:
             // 界面上已经做过"二次确认"，这里直接投
             postMechRequest(MECH_REQ_CLEAR_BOOKS, 0);
+            break;
+        case DEBUG_CMD_TAKE_BOOK:
+            // 书列表页的"取出"按钮：只投请求，真正执行在 stepperTask（取书流程）
+            if (!postMechRequest(MECH_REQ_TAKE_BOOK, (int32_t)arg)) {
+                Serial.println("取书: 请求队列满，请再点一次");
+            }
             break;
         default:
             break;

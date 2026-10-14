@@ -1219,14 +1219,37 @@
 #define CFG_PUSH_OUT_STEPS 875
 #endif
 
-// 推书回退步数。
-// ⚠️ 只有实际机械结构允许（推书板能退回来、且不会把书带回去）才启用。
-//    默认**不回退**（CFG_PUSH_AUTO_RETRACT=0）：推出后由用户把书拿走，推书板停在前面。
+// 推书回退：推出 -> 停住一段时间 -> 反向收回（取书流程固定走这三步）。
+//   1 = 自动回退（默认）：推出 -> 停 CFG_PUSH_HOLD_MS -> 反向走 CFG_PUSH_RETRACT_STEPS 步
+//   0 = 不回退（推书板停在前面，只适合人工把书拿走的调试场合）
 #ifndef CFG_PUSH_AUTO_RETRACT
-#define CFG_PUSH_AUTO_RETRACT 0
+#define CFG_PUSH_AUTO_RETRACT 1
 #endif
+// 回退步数：默认与推出行程一致（875），保证推书板回到出发位置。
 #ifndef CFG_PUSH_RETRACT_STEPS
-#define CFG_PUSH_RETRACT_STEPS 600
+#define CFG_PUSH_RETRACT_STEPS 875
+#endif
+
+// ==== 取书流程：推出后先"停住"多久再回退(ms) ====
+// 用户要求：推书电机推出后等待 2 秒（写进配置）。
+// ⚠️ 这个等待必须用非阻塞状态机实现（只看 deadline，不调 delay），
+//    否则会把整个 stepperTask 卡住 2 秒，连急停都按不动。
+#ifndef CFG_PUSH_HOLD_MS
+#define CFG_PUSH_HOLD_MS 2000
+#endif
+
+// ==== 取书流程：回退完成后是否读二哈校验"下一本是不是它" ====
+//   1 = 校验（默认）：回退到位后等 CFG_TAKE_VERIFY_DELAY_MS，再读一帧二哈，
+//       把它识别到的**分类 ID** 和"现在应该在最顶上那本"比对。
+//   0 = 不读二哈（要把二哈摘掉、单独调机械时用）。
+// ⚠️ 校验不通过**绝不阻断取书**：只打串口 + 界面提示，记录照常更新。
+//    二哈离线、或者它不在分类算法(a,2/a,3)下，都会走到这条路上。
+#ifndef CFG_TAKE_VERIFY_ENABLE
+#define CFG_TAKE_VERIFY_ENABLE 1
+#endif
+// 回退完成后等多久再去读二哈（用户要求 1 秒；二哈识别周期 = 1000ms）
+#ifndef CFG_TAKE_VERIFY_DELAY_MS
+#define CFG_TAKE_VERIFY_DELAY_MS 1000
 #endif
 
 // 单次自动动作允许的最大推书步数
@@ -1256,6 +1279,7 @@
 #define CFG_STORE_DOWN_SIGN 1
 #endif
 
+// ==== 两个电机的正反转：改这两行就能翻方向，不用动逻辑 ====
 #ifndef CFG_LIFT_DIR_SIGN
 #define CFG_LIFT_DIR_SIGN 1
 #endif

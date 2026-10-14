@@ -578,42 +578,49 @@ def main():
     mech2 = Mechanism(lift2, Motor(CFG_STEPPER_PUSH_RANGE_STEPS))
     check("存书前先人工归零", mech2.set_zero_here())
 
-    for subject in (3, 2, 1):   # 依次放语文(3)? 不，这里依次放 id=3,2,1
-        book_add_at_top(stack, subject)          # 记录插到数组顶部
+    for subject in (3, 2, 1):   # 依次放 id=3,2,1（最后放的排最顶）
+        book_add_at_top(stack, subject)
         down = -CFG_LIFT_STEPS_PER_BOOK
         if CFG_STORE_DOWN_SIGN < 0:
             down = -down
         assert mech2.jog(AXIS_LIFT, down, True), "下移请求应被接受"
         drive(mech2)
-        mech2.take_result()                      # 读走结果，回 IDLE
+        mech2.take_result()
 
     check("连放 3 本后升降累计位置 = -3 本书",
           lift2.pos_steps == -3 * CFG_LIFT_STEPS_PER_BOOK, str(lift2.pos_steps))
     check("数组顺序 = 最后放的排最顶", [b["id"] for b in stack] == [1, 2, 3],
           str([b["id"] for b in stack]))
-    check("每本书的相对位置偏移 = 下标 x 125 步",
-          mech2.lift.pos_steps + 0 == -3 * CFG_LIFT_STEPS_PER_BOOK)
 
-    # 关键不变量：把第 i 本送到取书口，需要的目标位置(相对零点) = i * 125
-    # 因为下移后"平台顶面"就是取书/投书口的位置。
-    ok_all = True
-    for i in range(len(stack)):
-        target = i * CFG_LIFT_STEPS_PER_BOOK
-        book_after_platform_top = target
-        book_abs = mech2.lift.pos_steps + book_after_platform_top
-        if book_abs != -3 * CFG_LIFT_STEPS_PER_BOOK + i * CFG_LIFT_STEPS_PER_BOOK:
-            ok_all = False
-    check("下标 i 的目标位置公式 i*125 自洽", ok_all)
-    # 真正有意义的检查：从当前平台位置出发，真正走一次"取下标 0"，看目标位置算得对不对。
-    # 平台现在在 -3*125（顶面就是取书口），要取下标 0 的那本，目标位置应该是 0 步。
-    target0 = 0 * CFG_LIFT_STEPS_PER_BOOK
-    moved = target0 - mech2.lift.pos_steps          # = +375，要往回走 3 本书
-    check("取下标0时需要把平台往回走 3 本书", moved == 3 * CFG_LIFT_STEPS_PER_BOOK, str(moved))
-    assert mech2.move_lift_to(target0)
+    # 关键不变量（**本次修正**）：把"从最下面数第 j 本"送到推出口，目标位置 = -j x 125。
+    # 【坐标系（用户实机确认）】
+    #   0   = 空平台：平台面正好在推出口的高度，最下面那本可以被推出来；
+    #   放 n 本 -> 标准位 = -n x 125（书堆顶面正对投书口，新书能从同一个口放进来）；
+    #   数组是 顶->底（下标 0 = 最上面），所以下标 i 对应从下面数 j = n-1-i。
+    #   ⚠️ 以前代码写的是 +i x 125（方向反了），只有"下标0 且只有 1 本"时碰巧对。
+    def target_of(index, total):
+        return -(total - 1 - index) * CFG_LIFT_STEPS_PER_BOOK
+
+    n = len(stack)
+    check("3 本时的标准位 = -375",
+          mech2.lift.pos_steps == -n * CFG_LIFT_STEPS_PER_BOOK, str(mech2.lift.pos_steps))
+    check("3 本取下标0(最上面) -> 目标 -250", target_of(0, n) == -250, str(target_of(0, n)))
+    check("3 本取下标1(中间)   -> 目标 -125", target_of(1, n) == -125, str(target_of(1, n)))
+    check("3 本取下标2(最下面) -> 目标 0", target_of(2, n) == 0, str(target_of(2, n)))
+    # 真正走一次：从标准位 -375 取下标 0（最上面那本），只需要往上 125
+    moved0 = target_of(0, n) - mech2.lift.pos_steps
+    check("取下标0 只需要往上移 125 步(不是 375)", moved0 == 125, str(moved0))
+    assert mech2.move_lift_to(target_of(0, n))
     drive(mech2)
     mech2.take_result()
-    check("升降回到零点 -> 下标0 那本正好在取书口", mech2.lift.pos_steps == 0,
+    check("取下标0 后平台停在 -250（那本正好在推出口）",
+          mech2.lift.pos_steps == -250, str(mech2.lift.pos_steps))
+    # 取完 1 本只剩 2 本 -> 标准位 = -250，正好就是现在这个位置（不用再动）
+    check("取完1本剩2本的标准位 = 现在的位置(-250)",
+          -(n - 1) * CFG_LIFT_STEPS_PER_BOOK == mech2.lift.pos_steps,
           str(mech2.lift.pos_steps))
+    check("剩2本时取现在下标1(原最下面那本) -> 目标 0",
+         target_of(1, 2) == 0, str(target_of(1, 2)))
     check("推书行程 = 875 步(已标定值)", CFG_PUSH_OUT_STEPS == 875)
     check("每本书步数 = 125 步(已标定值)", CFG_LIFT_STEPS_PER_BOOK == 125)
     check("存书下移方向宏存在且为 ±1", CFG_STORE_DOWN_SIGN in (1, -1))

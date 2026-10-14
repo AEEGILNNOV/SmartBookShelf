@@ -72,7 +72,8 @@ enum DisplayDebugCmd : uint8_t {
     DEBUG_CMD_STOP_ALL,       // 急停
     DEBUG_CMD_SET_ZERO,       // 把当前位置设为零点（人工归零）
     DEBUG_CMD_SAVE_NOW,       // 保存当前位置到 Flash
-    DEBUG_CMD_CLEAR_BOOKS     // 清空书籍数据（界面已做二次确认）
+    DEBUG_CMD_CLEAR_BOOKS,    // 清空书籍数据（界面已做二次确认）
+    DEBUG_CMD_TAKE_BOOK       // 书列表页"取出"按钮：arg = 要取的书籍下标（真正执行在 stepperTask）
 };
 
 // 内部队列里的元素：一条"调试意图"。cmd 取上面的枚举，arg 是参数（点动时 = 本次走多少步）

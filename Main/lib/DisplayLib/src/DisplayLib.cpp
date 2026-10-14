@@ -387,15 +387,22 @@ static void onBtnNextPage(lv_event_t *e) {
 }
 
 // 书列表页每一行右边的"取出"按钮
-// 只把"第几条"取出来交给 DisplayLib::removeBook()：
-//   · 它只在 BookList 里删数据（加锁，很快），不碰任何控件，
-//   · 行控件的重建交给 update() 里的 rebuildBookRows()，
-//     绝不能在这里删自己（LVGL 不允许在事件回调里删掉正在处理的控件）。
+//
+// ⚠️⚠️ 这里**绝对不能**直接调 removeBook()（这是修掉的一个真 bug）：
+//   以前就是直接删记录 —— 只从动态数组里删掉一条，**电机不动、Flash 也不写**，
+//   用户点了"取出"看到的现象就是"什么都没发生"（重启后那条记录还会回来）。
+//
+//   正确做法：只把"取第 index 本"投成一条请求，交给业务任务（stepperTask）执行取书流程：
+//     算升降目标 -> 移到推出口 -> 推书 -> 停 -> 回退 -> 二哈校验 -> 删记录+落盘 -> 升降回标准位。
+//   记录由流程在机械动作全部成功之后才删，所以这里什么都不删。
+//   · 回调里只入队：不阻塞、不碰 GPIO、不删控件
+//     （LVGL 不允许在事件回调里删掉正在处理的控件；行控件重建交给 update()）。
+static void debugPostCmd(uint8_t cmd, int16_t arg);   // 定义在下面的调试图队列一节
 static void onBtnTakeOut(lv_event_t *e) {
     int16_t index = (int16_t)(intptr_t)lv_event_get_user_data(e);
-    if (s_self != nullptr) {
-        s_self->removeBook(index);
-    }
+    Serial.printf("触摸: 请求取出第 %d 本（走取书流程，不是直接删记录）\n",
+                  (int)(index + 1));
+    debugPostCmd(DEBUG_CMD_TAKE_BOOK, index);
 }
 #endif  // CFG_RUN_TOUCH
 
@@ -1130,7 +1137,9 @@ int16_t DisplayLib::addBook(const char *text, int16_t id) {
     return index;
 }
 
-// 取出第 index 条：书列表页每行右边的"取出"按钮最终走到这里
+// 取出第 index 条：**只删内存里的记录，不碰机械、不落盘**。
+// ⚠️ 书列表页的"取出"按钮**不许**直接调它（那样就是"点了没反应"）—— 按钮走取书流程。
+//    这个函数只留给"纯测试/直接清数据"的场合。
 // ⚠️ 这个函数是在 LVGL 的事件回调里被调的，所以**只能改数据，不能删控件**
 //    （删掉正在处理事件的按钮会崩）。行控件的重建交给 update() 里的 rebuildBookRows()。
 int16_t DisplayLib::removeBook(int16_t index) {
