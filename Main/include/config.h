@@ -1196,7 +1196,7 @@
 //     ④ 记下走了多少步，就是"每本书步数"。
 //   未标定前保持这个保守值，并且**不要**开自动取书/存书。
 #ifndef CFG_LIFT_STEPS_PER_BOOK
-#define CFG_LIFT_STEPS_PER_BOOK 125
+#define CFG_LIFT_STEPS_PER_BOOK 80
 #endif
 
 // 数组下标 0（书堆最顶上一本）相对零点的步数偏移。
@@ -1225,9 +1225,12 @@
 #ifndef CFG_PUSH_AUTO_RETRACT
 #define CFG_PUSH_AUTO_RETRACT 1
 #endif
-// 回退步数：默认与推出行程一致（875），保证推书板回到出发位置。
+// 回退步数：**用户标定 = 950**（比推出行程 875 多退 75 步）。
+// ⚠️ 多退的这 75 步会让推书轴的位置每取一本净漂 +75 步（推出 -875、收回 +950），
+//    大约 27 次取书后会顶到软限位 ±2048，之后 movePushOut() 可能到不了位。
+//    如果希望每次推完回到原位，把这里改回 875。
 #ifndef CFG_PUSH_RETRACT_STEPS
-#define CFG_PUSH_RETRACT_STEPS 875
+#define CFG_PUSH_RETRACT_STEPS 950
 #endif
 
 // ==== 取书流程：推出后先"停住"多久再回退(ms) ====
