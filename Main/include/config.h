@@ -1414,6 +1414,12 @@
 //
 // ⚠️ 写入频率说明：一次动作写一次，**不是每个脉冲都写**。
 //    28BYJ 一分钟好几百步，每步都写会把 NVS 很快写坏。
+// 兜底自动保存的最小间隔(ms)：只有"位置和上次保存的不一样"且间隔超过它才补写。
+// 这是给"没捕捉到机械停止边沿"兜底用的，限流是防止连续点动时把 NVS 写太勤。
+#ifndef CFG_AUTO_SAVE_MIN_INTERVAL_MS
+#define CFG_AUTO_SAVE_MIN_INTERVAL_MS 1000
+#endif
+
 #ifndef CFG_AUTO_SAVE_ON_MOVE
 #define CFG_AUTO_SAVE_ON_MOVE 1
 #endif

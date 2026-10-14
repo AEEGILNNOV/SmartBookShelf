@@ -174,6 +174,8 @@ static const char *MOTOR_NAME[2] = { "升降", "推书" };
 //    28BYJ 一分钟好几百步，每步都写 NVS 的话 Flash 很快就被写坏了。
 static bool mechWasBusy = false;      // 上一轮机械是否在动（用来找下降沿）
 static bool autoSavedThisMove = false;// 本次动作是否已经自动保存过（防重复写）
+static int32_t lastSavedLiftSteps = 0;// 上一次已经写进 Flash 的升降步数（兜底用）
+static uint32_t lastAutoSaveMs = 0;   // 上一次自动保存的时刻（兜底限流，别写太勤）
 
 // -----------------------------------------------------------------------------
 // 前置函数声明
@@ -1211,6 +1213,8 @@ static void stepperTask(void *pvParameters) {
                     if (mechanism.setZeroHere()) {
                         // 归零后立刻落盘：这是"位置基准"的来源，必须马上记住
                         saveAllToFlash("人工归零");
+                        lastSavedLiftSteps = mechanism.liftSteps();   // 同步记账，避免兜底再写一次
+                        lastAutoSaveMs = millis();
                         notify("已把当前位置设为零点", CFG_MESSAGE_HOLD_MS);
                     } else {
                         Serial.printf("机械: ❌ 归零失败 —— %s\n",
@@ -1268,16 +1272,40 @@ static void stepperTask(void *pvParameters) {
 #if CFG_AUTO_SAVE_ON_MOVE
         {
             bool busyNow = mechanism.busy();
+            uint32_t nowMs = millis();
+            bool needSave = false;
+            const char *saveWhy = "";
+
             if (busyNow) {
                 autoSavedThisMove = false;   // 新一轮动作开始，允许下次停稳再存一次
             } else if (mechWasBusy && !autoSavedThisMove) {
-                // 刚停：把当前位置 + 位置有效性写进 Flash
+                // ---- 路径 1：机械刚停下来（正常路径）----
                 autoSavedThisMove = true;
-                storage.saveLiftSteps(mechanism.liftSteps());
+                needSave = true;
+                saveWhy = "机械已停止";
+            } else if (!autoSavedThisMove &&
+                       mechanism.liftSteps() != lastSavedLiftSteps &&
+                       (nowMs - lastAutoSaveMs) >= CFG_AUTO_SAVE_MIN_INTERVAL_MS) {
+                // ---- 路径 2（兜底）：位置和"上次已经写进 Flash 的值"不一样 ----
+                //
+                // 为什么要有这条：路径 1 依赖"busy 从 true 变 false"这个边沿。
+                // 万一因为某种原因没捕捉到那个边沿（动作被拒绝、状态变化太快等），
+                // 位置就会一直停在内存里、掉电就丢了。这里直接比对"当前位置 vs 上次已保存的位置"，
+                // 只要不一样就补写一次 —— 这才是"位置变了就一定落盘"的真正保证。
+                // 限流用 CFG_AUTO_SAVE_MIN_INTERVAL_MS，避免在连续动作时反复写。
+                needSave = true;
+                saveWhy = "检测到位置变化(兜底)";
+            }
+
+            if (needSave) {
+                int32_t pos = mechanism.liftSteps();
+                storage.saveLiftSteps(pos);
                 storage.savePositionState(mechanism.positionValid(),
                                           mechanism.needHoming());
-                Serial.printf("存储: 机械已停止, 自动保存位置 (%ld 步, 位置有效=%s)\n",
-                              (long)mechanism.liftSteps(),
+                lastSavedLiftSteps = pos;
+                lastAutoSaveMs = nowMs;
+                Serial.printf("存储: %s, 自动保存位置 (%ld 步, 位置有效=%s)\n",
+                              saveWhy, (long)pos,
                               mechanism.positionValid() ? "是" : "否");
             }
             mechWasBusy = busyNow;
