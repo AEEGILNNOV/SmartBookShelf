@@ -1516,4 +1516,176 @@
 #define STORAGELIB_VERSION "1.0.0"
 #endif
 
-// -----------------------------------------------------------------------------,// 14. 引脚冲突编译期体检（**新增：一次性把明确的抢脚拦在编译期**）,//,// 为什么要有这一段：引脚冲突在运行期的表现是"某个外设时好时坏"，非常难查。,// 这里用预处理期就把能确定的冲突拦下来，编译直接报中文错误，,// 而不是烧进去以后在台子上猜。,//,// ⚠️ 只检查"能确定冲突"的情况：同一个 GPIO 被两个**同时启用**的外设占用。,//    外设关掉时不算占用（没接线的脚不算冲突）。,// -----------------------------------------------------------------------------,,// ---- 14.1 每个电机的 4 个 IN 脚内部不能重复 ----,#if CFG_STEPPER_LIFT_ENABLE,#if (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_LIFT_PINS)[1] || \,    (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_LIFT_PINS)[2] || \,    (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_LIFT_PINS)[3],#error "config.h 14.1: 升降电机的 4 个 IN 脚里有重复的 GPIO，检查 CFG_STEPPER_LIFT_PINS",#endif,#endif,,#if CFG_STEPPER_PUSH_ENABLE,#if (CFG_STEPPER_PUSH_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[1] || \,    (CFG_STEPPER_PUSH_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[2] || \,    (CFG_STEPPER_PUSH_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[3],#error "config.h 14.1: 推书电机的 4 个 IN 脚里有重复的 GPIO，检查 CFG_STEPPER_PUSH_PINS",#endif,#endif,,// ---- 14.2 两个电机之间不能抢脚 ----,#if CFG_STEPPER_LIFT_ENABLE && CFG_STEPPER_PUSH_ENABLE,#if (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[0] || \,    (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[1] || \,    (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[2] || \,    (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_PUSH_PINS)[3] || \,    (CFG_STEPPER_LIFT_PINS)[1] == (CFG_STEPPER_PUSH_PINS)[0] || \,    (CFG_STEPPER_LIFT_PINS)[1] == (CFG_STEPPER_PUSH_PINS)[1] || \,    (CFG_STEPPER_LIFT_PINS)[1] == (CFG_STEPPER_PUSH_PINS)[2] || \,    (CFG_STEPPER_LIFT_PINS)[1] == (CFG_STEPPER_PUSH_PINS)[3] || \,    (CFG_STEPPER_LIFT_PINS)[2] == (CFG_STEPPER_PUSH_PINS)[0] || \,    (CFG_STEPPER_LIFT_PINS)[2] == (CFG_STEPPER_PUSH_PINS)[1] || \,    (CFG_STEPPER_LIFT_PINS)[2] == (CFG_STEPPER_PUSH_PINS)[2] || \,    (CFG_STEPPER_LIFT_PINS)[2] == (CFG_STEPPER_PUSH_PINS)[3] || \,    (CFG_STEPPER_LIFT_PINS)[3] == (CFG_STEPPER_PUSH_PINS)[0] || \,    (CFG_STEPPER_LIFT_PINS)[3] == (CFG_STEPPER_PUSH_PINS)[1] || \,    (CFG_STEPPER_LIFT_PINS)[3] == (CFG_STEPPER_PUSH_PINS)[2] || \,    (CFG_STEPPER_LIFT_PINS)[3] == (CFG_STEPPER_PUSH_PINS)[3],#error "config.h 14.2: 升降电机和推书电机抢 GPIO，检查 CFG_STEPPER_LIFT_PINS / CFG_STEPPER_PUSH_PINS",#endif,#endif,,// ---- 14.3 HC-SR04 与升降电机抢脚（这是原工程就有的老问题，必须拦） ----,// 把 TRIG/ECHO 改成空闲脚（例如 38/39）之后，这个检查就会自然通过。,#if CFG_ENABLE_STEPPER && CFG_STEPPER_LIFT_ENABLE && (CFG_ENABLE_WAVE || PIN_WAVE_TRIG >= 0),#if (PIN_WAVE_TRIG >= 0) && ((PIN_WAVE_TRIG == (CFG_STEPPER_LIFT_PINS)[0]) || \,    (PIN_WAVE_TRIG == (CFG_STEPPER_LIFT_PINS)[1]) || \,    (PIN_WAVE_TRIG == (CFG_STEPPER_LIFT_PINS)[2]) || \,    (PIN_WAVE_TRIG == (CFG_STEPPER_LIFT_PINS)[3]) || \,    (PIN_WAVE_ECHO == (CFG_STEPPER_LIFT_PINS)[0]) || \,    (PIN_WAVE_ECHO == (CFG_STEPPER_LIFT_PINS)[1]) || \,    (PIN_WAVE_ECHO == (CFG_STEPPER_LIFT_PINS)[2]) || \,    (PIN_WAVE_ECHO == (CFG_STEPPER_LIFT_PINS)[3]),#error "config.h 14.3: HC-SR04 的 TRIG/ECHO 与升降电机的 IN 脚冲突。请把测距挪到空闲脚，例如在 platformio.ini 的 build_flags 里加 -DPIN_WAVE_TRIG=38 -DPIN_WAVE_ECHO=39",#endif,#endif,,// ---- 14.4 步进电机与 TFT 抢脚（TFT 的 6 根线是硬需求，冲突时只能改电机） ----,// 用"4 个 IN 脚之和"和"6 个 TFT 脚之和"做交叉检查不现实，,// 这里用逐项比较，只查最容易犯的错：LIFT/PUSH 的前两个脚撞上 TFT 的任一引脚。,#if CFG_STEPPER_LIFT_ENABLE,#if (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_SCLK || (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_MOSI || \,    (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_CS   || (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_DC   || \,    (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_RST  || (CFG_STEPPER_LIFT_PINS)[0] == PIN_TFT_BL   || \,    (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_SCLK || (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_MOSI || \,    (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_CS   || (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_DC   || \,    (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_RST  || (CFG_STEPPER_LIFT_PINS)[1] == PIN_TFT_BL   || \,    (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_SCLK || (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_MOSI || \,    (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_CS   || (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_DC   || \,    (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_RST  || (CFG_STEPPER_LIFT_PINS)[2] == PIN_TFT_BL   || \,    (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_SCLK || (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_MOSI || \,    (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_CS   || (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_DC   || \,    (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_RST  || (CFG_STEPPER_LIFT_PINS)[3] == PIN_TFT_BL,#error "config.h 14.4: 升降电机与 TFT 抢 GPIO，检查第 3 节和第 9 节的引脚表",#endif,#endif,,#if CFG_STEPPER_PUSH_ENABLE,#if (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_SCLK || (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_MOSI || \,    (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_CS   || (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_DC   || \,    (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_RST  || (CFG_STEPPER_PUSH_PINS)[0] == PIN_TFT_BL   || \,    (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_SCLK || (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_MOSI || \,    (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_CS   || (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_DC   || \,    (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_RST  || (CFG_STEPPER_PUSH_PINS)[1] == PIN_TFT_BL   || \,    (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_SCLK || (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_MOSI || \,    (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_CS   || (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_DC   || \,    (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_RST  || (CFG_STEPPER_PUSH_PINS)[2] == PIN_TFT_BL   || \,    (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_SCLK || (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_MOSI || \,    (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_CS   || (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_DC   || \,    (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_RST  || (CFG_STEPPER_PUSH_PINS)[3] == PIN_TFT_BL,#error "config.h 14.4: 推书电机与 TFT 抢 GPIO，检查第 3 节和第 9 节的引脚表",#endif,#endif,,// ---- 14.5 外设不能用被内部 Flash / OPI PSRAM / USB / UART0 占掉的 GPIO ----,// 这一段是"防手滑"：这些 GPIO 一旦被外设占用，表现是随机复位或直接起不来。,#if (PIN_HUSKY_SDA >= 26 && PIN_HUSKY_SDA <= 32) || (PIN_HUSKY_SCL >= 26 && PIN_HUSKY_SCL <= 32),#error "config.h 14.5: 二哈 SDA/SCL 不能落在 GPIO26~32（封装内 Flash）",#endif,#if (PIN_HUSKY_SDA >= 33 && PIN_HUSKY_SDA <= 37) || (PIN_HUSKY_SCL >= 33 && PIN_HUSKY_SCL <= 37),#error "config.h 14.5: 二哈 SDA/SCL 不能落在 GPIO33~37（OPI PSRAM）",#endif,#if (PIN_WAVE_TRIG >= 26 && PIN_WAVE_TRIG <= 32) || (PIN_WAVE_ECHO >= 26 && PIN_WAVE_ECHO <= 32),#error "config.h 14.5: HC-SR04 不能落在 GPIO26~32（封装内 Flash）",#endif,#if (PIN_WAVE_TRIG >= 33 && PIN_WAVE_TRIG <= 37) || (PIN_WAVE_ECHO >= 33 && PIN_WAVE_ECHO <= 37),#error "config.h 14.5: HC-SR04 不能落在 GPIO33~37（OPI PSRAM）",#endif,#if (PIN_WAVE_TRIG == 19) || (PIN_WAVE_TRIG == 20) || (PIN_WAVE_ECHO == 19) || (PIN_WAVE_ECHO == 20),#error "config.h 14.5: HC-SR04 不能落在 GPIO19/20（USB D-/D+）",#endif,#if (PIN_WAVE_TRIG == 43) || (PIN_WAVE_TRIG == 44) || (PIN_WAVE_ECHO == 43) || (PIN_WAVE_ECHO == 44),#error "config.h 14.5: HC-SR04 不能落在 GPIO43/44（UART0 调试串口）",#endif,,// ---- 14.6 超声波引脚不能留给触摸（两条总线都在同一批 GPIO 上很容易搞混） ----,#if CFG_RUN_TOUCH && (PIN_WAVE_TRIG >= 0),#if (PIN_WAVE_TRIG == PIN_TOUCH_CS) || (PIN_WAVE_TRIG == PIN_TOUCH_CLK) || \,    (PIN_WAVE_TRIG == PIN_TOUCH_DIN) || (PIN_WAVE_TRIG == PIN_TOUCH_DO) || \,    (PIN_WAVE_ECHO == PIN_TOUCH_CS) || (PIN_WAVE_ECHO == PIN_TOUCH_CLK) || \,    (PIN_WAVE_ECHO == PIN_TOUCH_DIN) || (PIN_WAVE_ECHO == PIN_TOUCH_DO),#error "config.h 14.6: HC-SR04 与触摸抢 GPIO，检查第 3.2 节和第 8 节",#endif,#endif,,,// =============================================================================,// 【本次改造的统一引脚分配表】—— 一眼看全部，改线只改第 3 / 3.2 / 4 / 5 / 8 / 9 节,//,//  外设                     GPIO                      备注,//  ----------------------   -----------------------   ------------------------------,//  ILI9341 SCLK             12                        TFT_eSPI USER_SETUP（platformio.ini）,//  ILI9341 MOSI             11                        同上,//  ILI9341 CS               10                        同上,//  ILI9341 DC               9                         同上,//  ILI9341 RST              8                         同上,//  ILI9341 BL               47                        同上,//  XPT2046 T_CS             48                        触摸自己的 5 根线，不占屏的 SPI,//  XPT2046 T_IRQ            18                        可不接（本工程轮询）,//  XPT2046 T_CLK            13                        本来是步进电机3 的旧引脚，本次释放,//  XPT2046 T_DIN            14                        同上,//  XPT2046 T_DO             38                        同上,//  HUSKYLENS 2 SDA          1                         I2C 地址 0x50；与摄像头 SCCB 冲突,//  HUSKYLENS 2 SCL          2                         同上,//  按键 1 / 2 / 3           45 / 46 / 0               45/46 空闲；GPIO0 是 BOOT 脚,//  按键 A / B（取书/存书）  -1 / -1                   默认不接（需求：不要擅自加按键脚）,//  升降电机 IN1~IN4         4, 5, 6, 7                28BYJ-48 + ULN2003,//  推书电机 IN1~IN4         15, 16, 17, 21            28BYJ-48 + ULN2003,//  HC-SR04 TRIG             5                         与升降电机 IN2 冲突 -> 默认关,//  HC-SR04 ECHO             6                         5V，必须 1k+2k 分压！,//,//  ⚠️ 绝对不能接外设：GPIO26~32（封装内 Flash）、GPIO33~37（OPI PSRAM）、,//     GPIO22~25（S3 上不存在）、GPIO19/20（USB）、GPIO43/44（UART0）。,//,//  ⚠️ 空出来的 GPIO（本次没用到，以后要用先查一遍）：,//     3, 7 已被升降电机占用；剩余空闲：37 之后的 39、40、41、42（但 40/41/42 = 摄像头 D5/D6/D7）,// =============================================================================
+// -----------------------------------------------------------------------------
+// 14. 引脚冲突编译期体检（**一次性把明确的抢脚拦在编译期**）
+//
+// 为什么要有这一段：引脚冲突在运行期的表现是"某个外设时好时坏"，非常难查。
+// 这里在编译期就拦下来，编译直接报中文错误，而不是烧进去以后在台子上猜。
+//
+// ⚠️ 只检查"能确定冲突"的情况：同一个 GPIO 被两个**同时启用**的外设占用。
+//    外设关掉时不算占用（没接线的脚不算冲突）。
+//
+// ⚠️⚠️ 【为什么 14.1~14.4 改用 static_assert，而不是原来的 #if 数组比较】
+//   原来的写法是 #if (CFG_STEPPER_LIFT_PINS)[0] == (CFG_STEPPER_LIFT_PINS)[1]，
+//   但 CFG_STEPPER_LIFT_PINS 展开就是 { 4, 5, 6, 7 } —— 预处理器在**求值之前**
+//   就看到了花括号，于是直接报 'token "{" is not valid in preprocessor expressions'。
+//   下标的 [] 是宏展开之后才应用的，所以"把引脚拆成单个宏"也救不了这一行
+//   （已用 xtensa-esp32s3-elf-g++ 实测：任何花括号宏出现在 #if 里都会这样失败）。
+//   => 凡是"要拿数组元素参与比较"的检查，一律交给编译期常量求值 static_assert：
+//      它跑在宏全部展开之后的 C++ 语义阶段，数组、递归、位运算都能用，
+//      而且配置冲突时**编译直接失败**，中文消息就打印在报错里。
+//   => 纯整数宏之间的比较（14.5 / 14.6）继续用 #if，那部分在 C 和 C++ 里都合法。
+//
+// ⚠️ config.h 也会被 C 编译单元 include（src/ui_font_16.c），所以 C++ 那一块
+//    必须用 #ifdef __cplusplus 包住：C 单元直接跳过（引脚表只有 C++ 代码在用），
+//    否则一个 namespace/constexpr 就会让 C 那边编译不过。
+// -----------------------------------------------------------------------------
+
+// ---- 14.1 每个电机的 4 个 IN 脚内部不能重复 ----
+// ---- 14.2 两个电机之间不能抢脚 ----
+// ---- 14.3 测距(HC-SR04) 与升降电机抢脚（只在 CFG_RUN_WAVE=1 时才算数）----
+// ---- 14.4 步进电机与 TFT 抢脚（TFT 的 6 根线是硬需求，冲突时只能改电机）----
+#ifdef __cplusplus
+#ifndef CFG_PIN_CHECK_DONE          // 自己带一个一次性开关：万一 config.h 被重复包含也不会重定义
+#define CFG_PIN_CHECK_DONE
+namespace cfg_pin_check {
+
+    // 引脚号映射成 64 位里的一个位；-1（不接）和越界的一律算 0，也就是"不占脚"
+    constexpr uint64_t bitOf(int pin) {
+        return (pin >= 0 && pin < 64) ? (1ULL << pin) : 0ULL;
+    }
+
+    // ⚠️ 本工程用的是 C++11：constexpr 函数体只允许"单条 return"，不能写 for/while
+    //    （循环要 C++14 才允许），所以这里全部用递归展开。递归深度最大 6x6=36，忽略不计。
+    //
+    // 同一组内部两两比较：只比 i<j，这样"自己和自己"不会算成冲突
+    constexpr uint64_t dupRec(const uint8_t *p, int n, int i, int j) {
+        return (i >= n) ? 0ULL
+             : (j >= n) ? dupRec(p, n, i + 1, i + 2)
+             : ((bitOf(p[i]) & bitOf(p[j])) | dupRec(p, n, i, j + 1));
+    }
+    constexpr uint64_t dupMask(const uint8_t *p, int n) { return dupRec(p, n, 0, 1); }
+
+    // 两组之间两两比较
+    constexpr uint64_t crossRec(const uint8_t *a, int na, const uint8_t *b, int nb, int i, int j) {
+        return (i >= na) ? 0ULL
+             : (j >= nb) ? crossRec(a, na, b, nb, i + 1, 0)
+             : ((bitOf(a[i]) & bitOf(b[j])) | crossRec(a, na, b, nb, i, j + 1));
+    }
+    constexpr uint64_t crossMask(const uint8_t *a, int na, const uint8_t *b, int nb) {
+        return crossRec(a, na, b, nb, 0, 0);
+    }
+
+#if CFG_STEPPER_LIFT_ENABLE
+    constexpr uint8_t LIFT4[4] = CFG_STEPPER_LIFT_PINS;
+    static_assert(dupMask(LIFT4, 4) == 0,
+                  "config.h 14.1: 升降电机的 4 个 IN 脚里有重复的 GPIO，检查 CFG_STEPPER_LIFT_PINS");
+#endif
+
+#if CFG_STEPPER_PUSH_ENABLE
+    constexpr uint8_t PUSH4[4] = CFG_STEPPER_PUSH_PINS;
+    static_assert(dupMask(PUSH4, 4) == 0,
+                  "config.h 14.1: 推书电机的 4 个 IN 脚里有重复的 GPIO，检查 CFG_STEPPER_PUSH_PINS");
+#endif
+
+#if CFG_STEPPER_LIFT_ENABLE && CFG_STEPPER_PUSH_ENABLE
+    static_assert(crossMask(LIFT4, 4, PUSH4, 4) == 0,
+                  "config.h 14.2: 升降电机和推书电机抢 GPIO，检查 CFG_STEPPER_LIFT_PINS / CFG_STEPPER_PUSH_PINS");
+#endif
+
+    // TFT 的 6 根线（MISO=-1 不接，不参与检查）
+    constexpr uint8_t TFT6[6] = { (uint8_t)PIN_TFT_SCLK, (uint8_t)PIN_TFT_MOSI,
+                                  (uint8_t)PIN_TFT_CS,  (uint8_t)PIN_TFT_DC,
+                                  (uint8_t)PIN_TFT_RST, (uint8_t)PIN_TFT_BL };
+
+#if CFG_STEPPER_LIFT_ENABLE
+    static_assert(crossMask(LIFT4, 4, TFT6, 6) == 0,
+                  "config.h 14.4: 升降电机与 TFT 抢 GPIO，检查第 3 节和第 9 节的引脚表");
+#endif
+
+#if CFG_STEPPER_PUSH_ENABLE
+    static_assert(crossMask(PUSH4, 4, TFT6, 6) == 0,
+                  "config.h 14.4: 推书电机与 TFT 抢 GPIO，检查第 3 节和第 9 节的引脚表");
+#endif
+
+#if CFG_RUN_WAVE
+    // ⚠️ 这里必须门控 CFG_RUN_WAVE：wave 关着的时候 TRIG/ECHO 根本不参与工作，
+    //    只判断宏是否存在会把"wave 默认关闭"的默认配置卡成编译失败。
+    constexpr uint8_t WAVE2[2] = { (uint8_t)PIN_WAVE_TRIG, (uint8_t)PIN_WAVE_ECHO };
+#if CFG_STEPPER_LIFT_ENABLE
+    static_assert(crossMask(WAVE2, 2, LIFT4, 4) == 0,
+                  "config.h 14.3: HC-SR04 的 TRIG/ECHO 与升降电机的 IN 脚冲突，请把测距挪到空闲脚");
+#endif
+#endif
+
+}   // namespace cfg_pin_check
+#endif  // CFG_PIN_CHECK_DONE
+#endif  // __cplusplus
+
+// ---- 14.5 外设不能用被内部 Flash / OPI PSRAM / USB / UART0 占掉的 GPIO ----
+// 这一段是"防手滑"：这些 GPIO 一旦被外设占用，表现是随机复位或直接起不来。
+// 纯整数宏比较，#if 在 C / C++ 里都合法。
+#if (PIN_HUSKY_SDA >= 26 && PIN_HUSKY_SDA <= 32) || (PIN_HUSKY_SCL >= 26 && PIN_HUSKY_SCL <= 32)
+#error "config.h 14.5: 二哈 SDA/SCL 不能落在 GPIO26~32（封装内 Flash）"
+#endif
+#if (PIN_HUSKY_SDA >= 33 && PIN_HUSKY_SDA <= 37) || (PIN_HUSKY_SCL >= 33 && PIN_HUSKY_SCL <= 37)
+#error "config.h 14.5: 二哈 SDA/SCL 不能落在 GPIO33~37（OPI PSRAM）"
+#endif
+#if (PIN_WAVE_TRIG >= 26 && PIN_WAVE_TRIG <= 32) || (PIN_WAVE_ECHO >= 26 && PIN_WAVE_ECHO <= 32)
+#error "config.h 14.5: HC-SR04 不能落在 GPIO26~32（封装内 Flash）"
+#endif
+#if (PIN_WAVE_TRIG >= 33 && PIN_WAVE_TRIG <= 37) || (PIN_WAVE_ECHO >= 33 && PIN_WAVE_ECHO <= 37)
+#error "config.h 14.5: HC-SR04 不能落在 GPIO33~37（OPI PSRAM）"
+#endif
+#if (PIN_WAVE_TRIG == 19) || (PIN_WAVE_TRIG == 20) || (PIN_WAVE_ECHO == 19) || (PIN_WAVE_ECHO == 20)
+#error "config.h 14.5: HC-SR04 不能落在 GPIO19/20（USB D-/D+）"
+#endif
+#if (PIN_WAVE_TRIG == 43) || (PIN_WAVE_TRIG == 44) || (PIN_WAVE_ECHO == 43) || (PIN_WAVE_ECHO == 44)
+#error "config.h 14.5: HC-SR04 不能落在 GPIO43/44（UART0 调试串口）"
+#endif
+
+// ---- 14.6 测距引脚不能和触摸抢（两条总线的脚很容易接混）----
+// ⚠️ 必须门控 CFG_RUN_WAVE：默认配置里 wave 是关的，但 PIN_WAVE_TRIG 默认就是 38，
+//    而触摸旧脚位布局下 T_CS 也是 38 —— 不门控的话"默认配置"自己就编译不过。
+#if CFG_RUN_WAVE && CFG_RUN_TOUCH && (PIN_WAVE_TRIG >= 0)
+#if (PIN_WAVE_TRIG == PIN_TOUCH_CS) || (PIN_WAVE_TRIG == PIN_TOUCH_CLK) || \
+    (PIN_WAVE_TRIG == PIN_TOUCH_DIN) || (PIN_WAVE_TRIG == PIN_TOUCH_DO) || \
+    (PIN_WAVE_ECHO == PIN_TOUCH_CS) || (PIN_WAVE_ECHO == PIN_TOUCH_CLK) || \
+    (PIN_WAVE_ECHO == PIN_TOUCH_DIN) || (PIN_WAVE_ECHO == PIN_TOUCH_DO)
+#error "config.h 14.6: 测距与触摸抢 GPIO（默认布局下 TRIG/ECHO 38/39 就是 T_CS/T_IRQ），先挪脚再开 wave"
+#endif
+#endif
+
+
+// =============================================================================
+// 【本次改造的统一引脚分配表】—— 一眼看全部，改线只改第 3 / 3.2 / 4 / 5 / 8 / 9 节
+//
+//  外设                     GPIO                      备注
+//  ----------------------   -----------------------   ------------------------------
+//  ILI9341 SCLK             12                        TFT_eSPI USER_SETUP（platformio.ini）
+//  ILI9341 MOSI             11                        同上
+//  ILI9341 CS               10                        同上
+//  ILI9341 DC               9                         同上
+//  ILI9341 RST              8                         同上
+//  ILI9341 BL               47                        同上
+//  XPT2046 T_CS             48                        触摸自己的 5 根线，不占屏的 SPI
+//  XPT2046 T_IRQ            18                        可不接（本工程轮询）
+//  XPT2046 T_CLK            13                        本来是步进电机3 的旧引脚，本次释放
+//  XPT2046 T_DIN            14                        同上
+//  XPT2046 T_DO             38                        同上
+//  HUSKYLENS 2 SDA          1                         I2C 地址 0x50；与摄像头 SCCB 冲突
+//  HUSKYLENS 2 SCL          2                         同上
+//  按键 1 / 2 / 3           45 / 46 / 0               45/46 空闲；GPIO0 是 BOOT 脚
+//  按键 A / B（取书/存书）  -1 / -1                   默认不接（需求：不要擅自加按键脚）
+//  升降电机 IN1~IN4         4, 5, 6, 7                28BYJ-48 + ULN2003
+//  推书电机 IN1~IN4         15, 16, 17, 21            28BYJ-48 + ULN2003
+//  HC-SR04 TRIG             5                         与升降电机 IN2 冲突 -> 默认关
+//  HC-SR04 ECHO             6                         5V，必须 1k+2k 分压！
+//
+//  ⚠️ 绝对不能接外设：GPIO26~32（封装内 Flash）、GPIO33~37（OPI PSRAM）、
+//     GPIO22~25（S3 上不存在）、GPIO19/20（USB）、GPIO43/44（UART0）。
+//
+//  ⚠️ 空出来的 GPIO（本次没用到，以后要用先查一遍）：
+//     3 空闲；7 已被升降电机占用（IN4）；37 之后剩 39、40、41、42
+//     （但 40/41/42 = 摄像头 D5/D6/D7，要同时用摄像头就不能给触摸）
+// =============================================================================
